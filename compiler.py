@@ -1,292 +1,305 @@
 import sys
-import re
-
-from llvmlite import ir
-import llvmlite.binding as llvm
-
-I32 = ir.IntType(32)
-I8 = ir.IntType(8)
 
 
-def compilation_error(line_number, message):
-    print(f"compilation error: line {line_number}: {message}",
-          file=sys.stderr)
-    sys.exit(1)
+class CompileError(Exception):
+    pass
 
 
-def parse_operand(text, line_number, symbols):
-    text = text.strip()
+class Token:
+    def __init__(self, kind, text, line, col):
+        self.kind = kind
+        self.text = text
+        self.line = line
+        self.col = col
 
-    if re.fullmatch(r"\d+", text):
-        return ir.Constant(I32, int(text))
+    def __repr__(self):
+        return f"Token({self.kind!r}, {self.text!r}, {self.line}, {self.col})"
 
-    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text):
-        if text == "int" or text == "exit":
-            compilation_error(
-                line_number,
-                f"'{text}' is a reserved word"
-            )
 
-        if text not in symbols:
-            compilation_error(
-                line_number,
-                f"undeclared variable '{text}'"
-            )
+KEYWORDS = {
+    b"i32": "keyword",
+    b"mut": "keyword",
+    b"exit": "keyword",
+}
 
-        return builder.load(symbols[text], name=f"{text}_value")
 
-    compilation_error(
-        line_number,
-        f"invalid operand '{text}'"
+def is_alpha(b):
+    return (
+        b is not None
+        and (
+            65 <= b <= 90
+            or 97 <= b <= 122
+            or b == 95
+        )
     )
+
+
+def is_digit(b):
+    return b is not None and 48 <= b <= 57
+
+
+def lex(data: bytes):
+    lines = []
+    tokens = []
+
+    state = "START"
+    start = 0
+    brace_line = 0
+    brace_col = 0
+    in_brace = False
+
+    line = 1
+    col = 1
+    i = 0
+
+    while i <= len(data):
+        b = data[i] if i < len(data) else None
+
+        if state == "START":
+            if b is None:
+                if in_brace:
+                    raise CompileError(
+                        f"line {brace_line}:{brace_col}: "
+                        "'{' is not closed before the end of the line"
+                    )
+                break
+
+            if b == 32 or b == 9:
+                i += 1
+                col += 1
+                continue
+
+            if b == 10:
+                if in_brace:
+                    raise CompileError(
+                        f"line {brace_line}:{brace_col}: "
+                        "'{' is not closed before the end of the line"
+                    )
+                tokens.append(
+                    Token("endline", "\n", line, col)
+                )
+                lines.append(tokens)
+                tokens = []
+
+                line += 1
+                col = 1
+                i += 1
+                continue
+
+            if is_alpha(b):
+                state = "IDENT"
+                start = i
+                i += 1
+                col += 1
+                continue
+
+            if is_digit(b):
+                state = "NUMBER"
+                start = i
+                i += 1
+                col += 1
+                continue
+
+            if b == ord("{"):
+                if in_brace:
+                    raise CompileError(
+                        f"line {line}:{col}: unexpected byte '{{'"
+                    )
+                tokens.append(
+                    Token("lbrace", "{", line, col)
+                )
+
+                brace_line = line
+                brace_col = col
+                in_brace = True
+
+                i += 1
+                col += 1
+                continue
+
+            if b == ord("}"):
+                tokens.append(
+                    Token("rbrace", "}", line, col)
+                )
+                in_brace = False
+                i += 1
+                col += 1
+                continue
+
+            if b == ord(":"):
+                if i + 1 >= len(data) or data[i + 1] != ord("="):
+                    raise CompileError(
+                        f"line {line}:{col}: ':' must be followed by '='"
+                    )
+
+                tokens.append(
+                    Token("operator", ":=", line, col)
+                )
+
+                i += 2
+                col += 2
+                continue
+
+            if b == ord("="):
+                raise CompileError(
+                    f"line {line}:{col}: unexpected byte '='"
+                )
+
+            if b == ord("+"):
+                tokens.append(
+                    Token("operator", "+", line, col)
+                )
+                i += 1
+                col += 1
+                continue
+
+            if b == ord("-"):
+                tokens.append(
+                    Token("operator", "-", line, col)
+                )
+                i += 1
+                col += 1
+                continue
+
+            if b == ord("*"):
+                tokens.append(
+                    Token("operator", "*", line, col)
+                )
+                i += 1
+                col += 1
+                continue
+
+            raise CompileError(
+                f"line {line}:{col}: unexpected byte {chr(b)!r}"
+            )
+
+        elif state == "IDENT":
+            if b is not None and (is_alpha(b) or is_digit(b)):
+                i += 1
+                col += 1
+                continue
+
+            word = data[start:i]
+
+            if word in KEYWORDS:
+                kind = "keyword"
+            else:
+                kind = "identifier"
+
+            tokens.append(
+                Token(
+                    kind,
+                    word.decode("ascii"),
+                    line,
+                    col - (i - start)
+                )
+            )
+
+            state = "START"
+            continue
+
+        elif state == "NUMBER":
+            if b is not None and is_digit(b):
+                i += 1
+                col += 1
+                continue
+
+            if b is not None and is_alpha(b):
+                raise CompileError(
+                    f"line {line}:{col}: letter inside number"
+                )
+
+            number = data[start:i]
+
+            tokens.append(
+                Token(
+                    "constant",
+                    number.decode("ascii"),
+                    line,
+                    col - (i - start)
+                )
+            )
+
+            state = "START"
+            continue
+
+    if state == "IDENT":
+        word = data[start:i]
+
+        if word in KEYWORDS:
+            kind = "keyword"
+        else:
+            kind = "identifier"
+
+        tokens.append(
+            Token(
+                kind,
+                word.decode("ascii"),
+                line,
+                col - (i - start)
+            )
+        )
+
+    elif state == "NUMBER":
+        number = data[start:i]
+
+        tokens.append(
+            Token(
+                "constant",
+                number.decode("ascii"),
+                line,
+                col - (i - start)
+            )
+        )
+        
+    if in_brace:
+        raise CompileError(
+            f"line {brace_line}:{brace_col}: "
+            "'{' is not closed before the end of the line"
+        )
+
+    if tokens:
+        lines.append(tokens)
+
+    return lines
+
+
+def print_tokens(lines):
+    for line_tokens in lines:
+        for token in line_tokens:
+            print(
+                f"({token.text}, {token.kind}, "
+                f"{token.line}, {token.col})"
+            )
 
 
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv) != 2:
         print(
-            f"usage: {sys.argv[0]} input.txt output.ll",
-            file=sys.stderr
-        )
-        sys.exit(1)
-
-    input_path = sys.argv[1]
-    output_path = sys.argv[2]
-
-    global builder
-
-    module = ir.Module(name="practice1")
-    module.triple = llvm.get_default_triple()
-
-    main_function_type = ir.FunctionType(I32, [])
-
-    main_function = ir.Function(
-        module,
-        main_function_type,
-        name="main"
-    )
-
-    entry_block = main_function.append_basic_block("entry")
-    builder = ir.IRBuilder(entry_block)
-
-    printf_type = ir.FunctionType(
-        I32,
-        [ir.PointerType(I8)],
-        var_arg=True
-    )
-
-    printf = ir.Function(
-        module,
-        printf_type,
-        name="printf"
-    )
-
-    text = b"Program exit with result %d\n\0"
-
-    fmt_type = ir.ArrayType(I8, len(text))
-
-    fmt = ir.GlobalVariable(
-        module,
-        fmt_type,
-        name="fmt"
-    )
-
-    fmt.linkage = "private"
-    fmt.global_constant = True
-    fmt.initializer = ir.Constant(
-        fmt_type,
-        bytearray(text)
-    )
-
-    symbols = {}
-
-    try:
-        with open(input_path, "r") as source:
-            lines = source.readlines()
-
-    except OSError as e:
-        print(f"compilation error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    exit_seen = False
-
-    for line_number, raw_line in enumerate(lines, start=1):
-        line = raw_line.strip()
-
-        if not line:
-            compilation_error(
-                line_number,
-                "empty line"
-            )
-
-        if exit_seen:
-            compilation_error(
-                line_number,
-                "statement after exit"
-            )
-
-        declaration_match = re.fullmatch(
-            r"int\s+([A-Za-z_][A-Za-z0-9_]*)",
-            line
-        )
-
-        if declaration_match:
-            name = declaration_match.group(1)
-
-            if name in ("int", "exit"):
-                compilation_error(
-                    line_number,
-                    f"'{name}' is a reserved word"
-                )
-
-            if name in symbols:
-                compilation_error(
-                    line_number,
-                    f"redeclared variable '{name}'"
-                )
-
-            symbols[name] = builder.alloca(
-                I32,
-                name=name
-            )
-
-            continue
-
-        exit_match = re.fullmatch(
-            r"exit\s+([A-Za-z_][A-Za-z0-9_]*)",
-            line
-        )
-
-        if exit_match:
-            name = exit_match.group(1)
-
-            if name not in symbols:
-                compilation_error(
-                    line_number,
-                    f"undeclared variable '{name}'"
-                )
-
-            value = builder.load(
-                symbols[name],
-                name=f"{name}_exit"
-            )
-
-            fmt_pointer = builder.bitcast(
-                fmt,
-                ir.PointerType(I8)
-            )
-
-            builder.call(
-                printf,
-                [fmt_pointer, value]
-            )
-
-            builder.ret(ir.Constant(I32, 0))
-
-            exit_seen = True
-            continue
-
-        assignment_match = re.fullmatch(
-            r"([A-Za-z_][A-Za-z0-9_]*)\s*:=\s*(.+)",
-            line
-        )
-
-        if assignment_match:
-            destination = assignment_match.group(1)
-            expression = assignment_match.group(2).strip()
-
-            if destination not in symbols:
-                compilation_error(
-                    line_number,
-                    f"undeclared variable '{destination}'"
-                )
-
-            operation_match = re.fullmatch(
-                r"(.+?)\s*([+\-*])\s*(.+)",
-                expression
-            )
-
-            if operation_match:
-                left_text = operation_match.group(1).strip()
-                operator = operation_match.group(2)
-                right_text = operation_match.group(3).strip()
-
-                lhs = parse_operand(
-                    left_text,
-                    line_number,
-                    symbols
-                )
-
-                rhs = parse_operand(
-                    right_text,
-                    line_number,
-                    symbols
-                )
-
-                if operator == "+":
-                    result = builder.add(
-                        lhs,
-                        rhs,
-                        name="addtmp"
-                    )
-
-                elif operator == "-":
-                    result = builder.sub(
-                        lhs,
-                        rhs,
-                        name="subtmp"
-                    )
-
-                elif operator == "*":
-                    result = builder.mul(
-                        lhs,
-                        rhs,
-                        name="multmp"
-                    )
-
-                else:
-                    compilation_error(
-                        line_number,
-                        f"unknown operator '{operator}'"
-                    )
-
-                builder.store(
-                    result,
-                    symbols[destination]
-                )
-
-                continue
-
-            value = parse_operand(
-                expression,
-                line_number,
-                symbols
-            )
-
-            builder.store(
-                value,
-                symbols[destination]
-            )
-
-            continue
-
-        compilation_error(
-            line_number,
-            "unparsable line"
-        )
-
-    if not exit_seen:
-        print(
-            f"compilation error: line {len(lines) + 1}: no exit statement",
+            f"usage: {sys.argv[0]} input.txt",
             file=sys.stderr
         )
         sys.exit(1)
 
     try:
-        with open(output_path, "w") as output:
-            output.write(str(module))
+        with open(sys.argv[1], "rb") as source:
+            data = source.read()
+
+        lines = lex(data)
+        print_tokens(lines)
 
     except OSError as e:
-        print(f"compilation error: {e}", file=sys.stderr)
+        print(
+            f"compilation error: {e}",
+            file=sys.stderr
+        )
+        sys.exit(1)
+
+    except CompileError as e:
+        print(
+            f"compilation error: {e}",
+            file=sys.stderr
+        )
         sys.exit(1)
 
 
