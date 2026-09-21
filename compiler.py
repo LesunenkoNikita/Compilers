@@ -5,15 +5,11 @@ import llvmlite.binding as llvm
 I32 = ir.IntType(32)
 I8 = ir.IntType(8)
 
-class CompileError(Exception):
-    pass
+class CompileError(Exception): pass
 
 class Token:
     def __init__(self, kind, text, line, col):
-        self.kind = kind
-        self.text = text
-        self.line = line
-        self.col = col
+        self.kind, self.text, self.line, self.col = kind, text, line, col
 
 KEYWORDS = {b"i32": "keyword", b"mut": "keyword", b"exit": "keyword"}
 
@@ -79,39 +75,27 @@ def lex(data: bytes):
     return lines
 
 class Node:
-    def __init__(self, line, col):
-        self.line = line
-        self.col = col
-
+    def __init__(self, line, col): self.line, self.col = line, col
 class ExprNode(Node): pass
 class StmtNode(Node): pass
 
 class ConstNode(ExprNode):
     def __init__(self, line, col, value):
-        super().__init__(line, col)
-        self.value = value
-    def dump(self, indent=0):
-        print(" " * indent + f"Const {self.value}")
-    def codegen(self, builder, symbols):
-        return ir.Constant(I32, self.value)
+        super().__init__(line, col); self.value = value
+    def dump(self, indent=0): print(" " * indent + f"Const {self.value}")
+    def codegen(self, builder, symbols): return ir.Constant(I32, self.value)
 
 class VarNode(ExprNode):
     def __init__(self, line, col, name):
-        super().__init__(line, col)
-        self.name = name
-    def dump(self, indent=0):
-        print(" " * indent + f"Var {self.name}")
+        super().__init__(line, col); self.name = name
+    def dump(self, indent=0): print(" " * indent + f"Var {self.name}")
     def codegen(self, builder, symbols):
-        if self.name not in symbols:
-            raise CompileError(f"line {self.line}:{self.col}: variable '{self.name}' is used before its declaration")
+        if self.name not in symbols: raise CompileError(f"line {self.line}:{self.col}: variable '{self.name}' is used before its declaration")
         return builder.load(symbols[self.name]["storage"], name=f"{self.name}_val")
 
 class BinOpNode(ExprNode):
     def __init__(self, line, col, op, left, right):
-        super().__init__(line, col)
-        self.op = op
-        self.left = left
-        self.right = right
+        super().__init__(line, col); self.op, self.left, self.right = op, left, right
     def dump(self, indent=0):
         print(" " * indent + f"BinOp {self.op}")
         self.left.dump(indent + 2)
@@ -125,17 +109,13 @@ class BinOpNode(ExprNode):
 
 class DeclNode(StmtNode):
     def __init__(self, line, col, name, mutable, init):
-        super().__init__(line, col)
-        self.name = name
-        self.mutable = mutable
-        self.init = init
+        super().__init__(line, col); self.name, self.mutable, self.init = name, mutable, init
     def dump(self, indent=0):
         m = "mut" if self.mutable else "const"
         print(" " * indent + f"Decl {self.name} {m}")
         self.init.dump(indent + 2)
     def codegen(self, builder, symbols):
-        if self.name in symbols:
-            raise CompileError(f"line {self.line}:{self.col}: variable '{self.name}' is declared twice")
+        if self.name in symbols: raise CompileError(f"line {self.line}:{self.col}: variable '{self.name}' is declared twice")
         val = self.init.codegen(builder, symbols)
         alloc = builder.alloca(I32, name=self.name)
         builder.store(val, alloc)
@@ -143,24 +123,19 @@ class DeclNode(StmtNode):
 
 class AssignNode(StmtNode):
     def __init__(self, line, col, name, value):
-        super().__init__(line, col)
-        self.name = name
-        self.value = value
+        super().__init__(line, col); self.name, self.value = name, value
     def dump(self, indent=0):
         print(" " * indent + f"Assign {self.name}")
         self.value.dump(indent + 2)
     def codegen(self, builder, symbols):
-        if self.name not in symbols:
-            raise CompileError(f"line {self.line}:{self.col}: variable '{self.name}' is used before its declaration")
-        if not symbols[self.name]["mut"]:
-            raise CompileError(f"line {self.line}:{self.col}: cannot assign to '{self.name}': it is not mut")
+        if self.name not in symbols: raise CompileError(f"line {self.line}:{self.col}: variable '{self.name}' is used before its declaration")
+        if not symbols[self.name]["mut"]: raise CompileError(f"line {self.line}:{self.col}: cannot assign to '{self.name}': it is not mut")
         val = self.value.codegen(builder, symbols)
         builder.store(val, symbols[self.name]["storage"])
 
 class ExitNode(StmtNode):
     def __init__(self, line, col, value):
-        super().__init__(line, col)
-        self.value = value
+        super().__init__(line, col); self.value = value
     def dump(self, indent=0):
         print(" " * indent + "Exit")
         self.value.dump(indent + 2)
@@ -172,16 +147,13 @@ class ExitNode(StmtNode):
 
 class ProgramNode(Node):
     def __init__(self, line, col, stmts, exit_node):
-        super().__init__(line, col)
-        self.stmts = stmts
-        self.exit_node = exit_node
+        super().__init__(line, col); self.stmts, self.exit_node = stmts, exit_node
     def dump(self, indent=0):
         print(" " * indent + "Program")
         for s in self.stmts: s.dump(indent + 2)
         self.exit_node.dump(indent + 2)
     def codegen(self, builder, symbols, printf, fmt):
-        for s in self.stmts:
-            s.codegen(builder, symbols)
+        for s in self.stmts: s.codegen(builder, symbols)
         self.exit_node.codegen(builder, symbols, printf, fmt)
 
 class Parser:
@@ -190,13 +162,8 @@ class Parser:
         self.toks = []
         self.pos = 0
 
-    def peek(self):
-        return self.toks[self.pos] if self.pos < len(self.toks) else None
-
-    def eat(self):
-        tok = self.toks[self.pos]
-        self.pos += 1
-        return tok
+    def peek(self): return self.toks[self.pos] if self.pos < len(self.toks) else None
+    def eat(self): tok = self.toks[self.pos]; self.pos += 1; return tok
 
     def expect(self, kind, what):
         tok = self.peek()
@@ -213,10 +180,8 @@ class Parser:
             if not toks: continue
             if toks[-1].kind == "endline": toks = toks[:-1]
             if not toks: continue
-            
             self.toks = toks
             self.pos = 0
-
             first = self.peek()
             if first.text == "exit":
                 if exit_node is not None: raise CompileError(f"line {first.line}:{first.col}: statement after exit")
@@ -224,7 +189,6 @@ class Parser:
             else:
                 if exit_node is not None: raise CompileError(f"line {first.line}:{first.col}: statement after exit")
                 stmts.append(self.parse_statement())
-            
             if self.peek() is not None:
                 tok = self.peek()
                 raise CompileError(f"line {tok.line}:{tok.col}: unexpected '{tok.text}' after the statement")
@@ -254,7 +218,7 @@ class Parser:
             raise CompileError(f"line {line}:{col}: variable '{name.text}' needs an initialiser in {{}}")
         self.eat()
         
-        init = self.parse_value()
+        init = self.parse_expr()
         
         tok = self.peek()
         if tok is None or tok.kind != "rbrace":
@@ -274,24 +238,29 @@ class Parser:
             got = f"'{tok.text}'" if tok else "end of line"
             raise CompileError(f"line {line}:{col}: expected ':=' after '{name.text}', got {got}")
         self.eat()
-        value = self.parse_value()
+        value = self.parse_expr()
         return AssignNode(name.line, name.col, name.text, value)
 
     def parse_exit(self):
         start = self.eat()
-        value = self.parse_operand()
+        value = self.parse_factor()
         return ExitNode(start.line, start.col, value)
 
-    def parse_value(self):
-        left = self.parse_operand()
-        tok = self.peek()
-        if tok is not None and tok.kind == "operator" and tok.text in ("+", "-", "*"):
+    def parse_expr(self):
+        node = self.parse_term()
+        while (tok := self.peek()) is not None and tok.kind == "operator" and tok.text in ("+", "-"):
             self.eat()
-            right = self.parse_operand()
-            return BinOpNode(tok.line, tok.col, tok.text, left, right)
-        return left
+            node = BinOpNode(tok.line, tok.col, tok.text, node, self.parse_term())
+        return node
 
-    def parse_operand(self):
+    def parse_term(self):
+        node = self.parse_factor()
+        while (tok := self.peek()) is not None and tok.kind == "operator" and tok.text == "*":
+            self.eat()
+            node = BinOpNode(tok.line, tok.col, tok.text, node, self.parse_factor())
+        return node
+
+    def parse_factor(self):
         tok = self.peek()
         if tok is None:
             last = self.toks[-1] if self.toks else Token("error", "", 1, 1)
@@ -304,6 +273,9 @@ class Parser:
             self.eat()
             return VarNode(tok.line, tok.col, tok.text)
         else:
+            if tok.text == "}":
+                raise CompileError(f"line {tok.line}:{tok.col}: expected a constant or a variable")
+            
             raise CompileError(f"line {tok.line}:{tok.col}: expected a constant or a variable, got '{tok.text}'")
 
 def main():
@@ -317,14 +289,12 @@ def main():
         if len(args) != 1:
             print(f"usage: {sys.argv[0]} [--ast] input.txt", file=sys.stderr)
             sys.exit(1)
-        input_path = args[0]
-        output_path = None
+        input_path, output_path = args[0], None
     else:
         if len(args) != 2:
             print(f"usage: {sys.argv[0]} [--ast] input.txt output.ll", file=sys.stderr)
             sys.exit(1)
-        input_path = args[0]
-        output_path = args[1]
+        input_path, output_path = args[0], args[1]
 
     module = ir.Module(name="practice3")
     module.triple = llvm.get_default_triple()
@@ -339,19 +309,14 @@ def main():
     fmt.initializer = ir.Constant(fmt_type, bytearray(text))
 
     try:
-        with open(input_path, "rb") as source:
-            lines = lex(source.read())
-        
+        with open(input_path, "rb") as source: lines = lex(source.read())
         parser = Parser(lines)
         tree = parser.parse_program()
-
         if print_ast:
             tree.dump()
             sys.exit(0)
-
         symbols = {}
         tree.codegen(builder, symbols, printf, fmt)
-
         with open(output_path, "w") as output:
             output.write(str(module))
     except OSError as e:
