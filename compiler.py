@@ -261,23 +261,6 @@ def syntax_error(token, message):
     )
 
 
-def end_of_line_token(tokens):
-    if tokens:
-        last = tokens[-1]
-
-        if last.kind == "endline":
-            return last
-
-        return Token(
-            "endline",
-            "\n",
-            last.line,
-            last.col + len(last.text)
-        )
-
-    return None
-
-
 def parse_operand(tokens, index, symbols):
     token = tokens[index]
 
@@ -361,7 +344,8 @@ def parse_declaration(tokens, symbols):
         index += 1
 
     if index >= len(tokens):
-        token = end_of_line_token(tokens)
+        last = tokens[-1]
+        token = Token("error", "", last.line, last.col + len(last.text))
         syntax_error(
             token,
             "expected variable name"
@@ -389,7 +373,7 @@ def parse_declaration(tokens, symbols):
         token = (
             tokens[index]
             if index < len(tokens)
-            else end_of_line_token(tokens)
+            else Token("error", "", name_token.line, name_token.col + len(name_token.text))
         )
 
         syntax_error(
@@ -403,7 +387,7 @@ def parse_declaration(tokens, symbols):
         token = (
             tokens[index]
             if index < len(tokens)
-            else end_of_line_token(tokens)
+            else Token("error", "", tokens[-1].line, tokens[-1].col + len(tokens[-1].text))
         )
 
         syntax_error(
@@ -421,7 +405,7 @@ def parse_declaration(tokens, symbols):
         token = (
             tokens[index]
             if index < len(tokens)
-            else end_of_line_token(tokens)
+            else Token("error", "", tokens[-1].line, tokens[-1].col + len(tokens[-1].text))
         )
 
         syntax_error(
@@ -468,8 +452,9 @@ def parse_assignment(tokens, symbols):
         )
 
     if len(tokens) < 3 or tokens[1].text != ":=":
+        token = tokens[1] if len(tokens) > 1 else Token("error", "", destination_token.line, destination_token.col + len(destination_token.text))
         syntax_error(
-            tokens[1] if len(tokens) > 1 else destination_token,
+            token,
             "expected ':='"
         )
 
@@ -585,15 +570,25 @@ def parse_line(tokens, symbols):
 
 
 def main():
-    if len(sys.argv) != 3:
-        print(
-            f"usage: {sys.argv[0]} input.txt output.ll",
-            file=sys.stderr
-        )
-        sys.exit(1)
+    args = sys.argv[1:]
+    print_tokens = False
 
-    input_path = sys.argv[1]
-    output_path = sys.argv[2]
+    if "--tokens" in args:
+        print_tokens = True
+        args.remove("--tokens")
+
+    if print_tokens:
+        if len(args) != 1:
+            print(f"usage: {sys.argv[0]} --tokens input.txt", file=sys.stderr)
+            sys.exit(1)
+        input_path = args[0]
+        output_path = None
+    else:
+        if len(args) != 2:
+            print(f"usage: {sys.argv[0]} [--tokens] input.txt output.ll", file=sys.stderr)
+            sys.exit(1)
+        input_path = args[0]
+        output_path = args[1]
 
     global builder
     global printf
@@ -657,6 +652,12 @@ def main():
 
         lines = lex(data)
 
+        if print_tokens:
+            for line_tokens in lines:
+                for token in line_tokens:
+                    print(f"({token.text}, {token.kind}, {token.line}:{token.col})")
+            sys.exit(0)
+
         symbols = {}
         exit_seen = False
 
@@ -717,12 +718,13 @@ def main():
             file=sys.stderr
         )
 
-        try:
-            import os
-            if os.path.exists(output_path):
-                os.remove(output_path)
-        except OSError:
-            pass
+        if output_path:
+            try:
+                import os
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+            except OSError:
+                pass
 
         sys.exit(1)
 
