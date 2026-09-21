@@ -1,0 +1,5 @@
+i32 x{5}
+i32 mut y{10}
+i32 z{x+y}
+y := z*2
+exit y
