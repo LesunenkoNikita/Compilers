@@ -201,7 +201,10 @@ class ConstNode(ExprNode):
     def dump(self, indent=0):
         print(" " * indent + f"Const {self.value}")
 
-    def codegen(self, builder, symbols):
+    def accept(self, visitor):
+        return visitor.visit_const(self)
+
+    def codegen(self, builder, ctx):
         return ir.Constant(I32, self.value)
 
 
@@ -214,7 +217,10 @@ class BoolNode(ExprNode):
         val_str = 'true' if self.value else 'false'
         print(" " * indent + f"Bool {val_str}")
 
-    def codegen(self, builder, symbols):
+    def accept(self, visitor):
+        return visitor.visit_bool(self)
+
+    def codegen(self, builder, ctx):
         return ir.Constant(I32, 1 if self.value else 0)
 
 
@@ -226,10 +232,11 @@ class VarNode(ExprNode):
     def dump(self, indent=0):
         print(" " * indent + f"Var {self.name}")
 
-    def codegen(self, builder, symbols):
-        if self.name not in symbols:
-            raise CompileError(f"line {self.line}:{self.col}: variable '{self.name}' is used before its declaration")
-        return builder.load(symbols[self.name]["storage"], name=f"{self.name}_val")
+    def accept(self, visitor):
+        return visitor.visit_var(self)
+
+    def codegen(self, builder, ctx):
+        return builder.load(self.decl.storage, name=f"{self.name}_val")
 
 
 class BinOpNode(ExprNode):
@@ -244,9 +251,12 @@ class BinOpNode(ExprNode):
         self.left.dump(indent + 2)
         self.right.dump(indent + 2)
 
-    def codegen(self, builder, symbols):
-        l = self.left.codegen(builder, symbols)
-        r = self.right.codegen(builder, symbols)
+    def accept(self, visitor):
+        return visitor.visit_binop(self)
+
+    def codegen(self, builder, ctx):
+        l = self.left.codegen(builder, ctx)
+        r = self.right.codegen(builder, ctx)
         
         if self.op == "+":
             return builder.add(l, r, name="addtmp")
@@ -271,14 +281,12 @@ class DeclNode(StmtNode):
         print(" " * indent + f"Decl {self.name} {self.type_name} {mut_str}")
         self.init.dump(indent + 2)
 
-    def codegen(self, builder, symbols):
-        if self.name in symbols:
-            raise CompileError(f"line {self.line}:{self.col}: variable '{self.name}' is declared twice")
-        
-        val = self.init.codegen(builder, symbols)
-        alloc = builder.alloca(I32, name=self.name)
-        builder.store(val, alloc)
-        symbols[self.name] = {"storage": alloc, "mut": self.mutable}
+    def accept(self, visitor):
+        return visitor.visit_decl(self)
+
+    def codegen(self, builder, ctx):
+        self.storage = builder.alloca(I32, name=self.name)
+        builder.store(self.init.codegen(builder, ctx), self.storage)
 
 
 class AssignNode(StmtNode):
@@ -291,13 +299,11 @@ class AssignNode(StmtNode):
         print(" " * indent + f"Assign {self.name}")
         self.value.dump(indent + 2)
 
-    def codegen(self, builder, symbols):
-        if self.name not in symbols:
-            raise CompileError(f"line {self.line}:{self.col}: variable '{self.name}' is used before its declaration")
-        if not symbols[self.name]["mut"]:
-            raise CompileError(f"line {self.line}:{self.col}: cannot assign to '{self.name}': it is not mut")
-            
-        builder.store(self.value.codegen(builder, symbols), symbols[self.name]["storage"])
+    def accept(self, visitor):
+        return visitor.visit_assign(self)
+
+    def codegen(self, builder, ctx):
+        builder.store(self.value.codegen(builder, ctx), self.decl.storage)
 
 
 class ExitNode(StmtNode):
@@ -309,9 +315,12 @@ class ExitNode(StmtNode):
         print(" " * indent + "Exit")
         self.value.dump(indent + 2)
 
-    def codegen(self, builder, symbols, printf, fmt):
-        val = self.value.codegen(builder, symbols)
-        builder.call(printf, [builder.bitcast(fmt, ir.PointerType(I8)), val])
+    def accept(self, visitor):
+        return visitor.visit_exit(self)
+
+    def codegen(self, builder, ctx):
+        val = self.value.codegen(builder, ctx)
+        builder.call(ctx["printf"], [builder.bitcast(ctx["fmt"], ir.PointerType(I8)), val])
         builder.ret(ir.Constant(I32, 0))
 
 
@@ -327,10 +336,13 @@ class ProgramNode(Node):
             s.dump(indent + 2)
         self.exit_node.dump(indent + 2)
 
-    def codegen(self, builder, symbols, printf, fmt):
+    def accept(self, visitor):
+        return visitor.visit_program(self)
+
+    def codegen(self, builder, ctx):
         for s in self.stmts:
-            s.codegen(builder, symbols)
-        self.exit_node.codegen(builder, symbols, printf, fmt)
+            s.codegen(builder, ctx)
+        self.exit_node.codegen(builder, ctx)
 
 
 class Parser:
@@ -497,11 +509,88 @@ class Parser:
         raise CompileError(f"line {tok.line}:{tok.col}: expected a constant or a variable, got '{tok.text}'")
 
 
+class SemanticChecker:
+    def __init__(self):
+        self.symbols = {}
+
+    def check_assignable(self, expr, want, at, what):
+        have = expr.type
+        
+        if isinstance(expr, ConstNode) and want == "i32" and have == "i64":
+            raise CompileError(f"line {expr.line}:{expr.col}: constant {expr.value} does not fit in {want}")
+            
+        if have == want or (have == "i32" and want == "i64"):
+            return
+            
+        raise CompileError(f"line {at.line}:{at.col}: cannot {what} of type {want} with a value of type {have}")
+
+    def visit_program(self, node):
+        for s in node.stmts:
+            s.accept(self)
+        node.exit_node.accept(self)
+
+    def visit_decl(self, node):
+        if node.name in self.symbols:
+            raise CompileError(f"line {node.line}:{node.col}: variable '{node.name}' is declared twice")
+            
+        node.init.accept(self)
+        self.check_assignable(node.init, node.type_name, node, f"initialise '{node.name}'")
+        self.symbols[node.name] = node
+
+    def visit_assign(self, node):
+        if node.name not in self.symbols:
+            raise CompileError(f"line {node.line}:{node.col}: variable '{node.name}' is used before its declaration")
+            
+        decl = self.symbols[node.name]
+        if not decl.mutable:
+            raise CompileError(f"line {node.line}:{node.col}: cannot assign to '{node.name}': it is not mut")
+            
+        node.value.accept(self)
+        self.check_assignable(node.value, decl.type_name, node, f"assign to '{node.name}'")
+        node.decl = decl
+
+    def visit_exit(self, node):
+        node.value.accept(self)
+
+    def visit_binop(self, node):
+        node.left.accept(self)
+        node.right.accept(self)
+        
+        lt = node.left.type
+        rt = node.right.type
+        
+        if node.op in ("+", "-", "*"):
+            if lt == "bool":
+                raise CompileError(f"line {node.line}:{node.col}: cannot apply '{node.op}' to bool")
+            if rt == "bool":
+                raise CompileError(f"line {node.line}:{node.col}: cannot apply '{node.op}' to bool")
+                
+            node.type = "i64" if "i64" in (lt, rt) else "i32"
+        else:
+            if (lt == "bool") != (rt == "bool"):
+                raise CompileError(f"line {node.line}:{node.col}: cannot compare bool with {rt if lt == 'bool' else lt}")
+                
+            node.type = "bool"
+
+    def visit_const(self, node):
+        node.type = "i64" if node.value > 4294967295 else "i32"
+
+    def visit_var(self, node):
+        if node.name not in self.symbols:
+            raise CompileError(f"line {node.line}:{node.col}: variable '{node.name}' is used before its declaration")
+            
+        node.decl = self.symbols[node.name]
+        node.type = node.decl.type_name
+
+    def visit_bool(self, node):
+        node.type = "bool"
+
+
 def main():
     args = sys.argv[1:]
     print_ast = False
     print_tokens = False
-
+    
     if "--tokens" in args:
         print_tokens = True
         args.remove("--tokens")
@@ -556,8 +645,15 @@ def main():
             tree.dump()
             sys.exit(0)
 
-        symbols = {}
-        tree.codegen(builder, symbols, printf, fmt)
+        checker = SemanticChecker()
+        tree.accept(checker)
+
+        ctx = {
+            "printf": printf,
+            "fmt": fmt
+        }
+        
+        tree.codegen(builder, ctx)
         
         with open(output_path, "w") as out:
             out.write(str(module))
