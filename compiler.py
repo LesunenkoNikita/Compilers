@@ -2,8 +2,10 @@ import sys
 from llvmlite import ir
 import llvmlite.binding as llvm
 
+I64 = ir.IntType(64)
 I32 = ir.IntType(32)
 I8 = ir.IntType(8)
+I1 = ir.IntType(1)
 
 
 class CompileError(Exception):
@@ -193,6 +195,12 @@ class StmtNode(Node):
     pass
 
 
+def coerce(builder, val, have, want):
+    if have == "i32" and want == "i64":
+        return builder.sext(val, I64, name="wide")
+    return val
+
+
 class ConstNode(ExprNode):
     def __init__(self, line, col, value):
         super().__init__(line, col)
@@ -205,7 +213,7 @@ class ConstNode(ExprNode):
         return visitor.visit_const(self)
 
     def codegen(self, builder, ctx):
-        return ir.Constant(I32, self.value)
+        return ir.Constant(I64 if self.type == "i64" else I32, self.value)
 
 
 class BoolNode(ExprNode):
@@ -221,7 +229,7 @@ class BoolNode(ExprNode):
         return visitor.visit_bool(self)
 
     def codegen(self, builder, ctx):
-        return ir.Constant(I32, 1 if self.value else 0)
+        return ir.Constant(I1, 1 if self.value else 0)
 
 
 class VarNode(ExprNode):
@@ -258,14 +266,23 @@ class BinOpNode(ExprNode):
         l = self.left.codegen(builder, ctx)
         r = self.right.codegen(builder, ctx)
         
-        if self.op == "+":
-            return builder.add(l, r, name="addtmp")
-        if self.op == "-":
-            return builder.sub(l, r, name="subtmp")
-        if self.op == "*":
-            return builder.mul(l, r, name="multmp")
+        if self.op in ("+", "-", "*"):
+            l = coerce(builder, l, self.left.type, self.type)
+            r = coerce(builder, r, self.right.type, self.type)
             
-        return builder.icmp_signed(self.op, l, r)
+            if self.op == "+":
+                return builder.add(l, r, name="addtmp")
+            if self.op == "-":
+                return builder.sub(l, r, name="subtmp")
+            if self.op == "*":
+                return builder.mul(l, r, name="multmp")
+        else:
+            if self.left.type in ("i32", "i64"):
+                w = "i64" if "i64" in (self.left.type, self.right.type) else "i32"
+                l = coerce(builder, l, self.left.type, w)
+                r = coerce(builder, r, self.right.type, w)
+                
+            return builder.icmp_signed(self.op, l, r)
 
 
 class DeclNode(StmtNode):
@@ -285,8 +302,16 @@ class DeclNode(StmtNode):
         return visitor.visit_decl(self)
 
     def codegen(self, builder, ctx):
-        self.storage = builder.alloca(I32, name=self.name)
-        builder.store(self.init.codegen(builder, ctx), self.storage)
+        if self.type_name == "i64":
+            t = I64
+        elif self.type_name == "bool":
+            t = I1
+        else:
+            t = I32
+            
+        self.storage = builder.alloca(t, name=self.name)
+        val = coerce(builder, self.init.codegen(builder, ctx), self.init.type, self.type_name)
+        builder.store(val, self.storage)
 
 
 class AssignNode(StmtNode):
@@ -303,7 +328,8 @@ class AssignNode(StmtNode):
         return visitor.visit_assign(self)
 
     def codegen(self, builder, ctx):
-        builder.store(self.value.codegen(builder, ctx), self.decl.storage)
+        val = coerce(builder, self.value.codegen(builder, ctx), self.value.type, self.decl.type_name)
+        builder.store(val, self.decl.storage)
 
 
 class ExitNode(StmtNode):
@@ -320,7 +346,18 @@ class ExitNode(StmtNode):
 
     def codegen(self, builder, ctx):
         val = self.value.codegen(builder, ctx)
-        builder.call(ctx["printf"], [builder.bitcast(ctx["fmt"], ir.PointerType(I8)), val])
+        
+        if self.value.type in ("i32", "i64"):
+            val = coerce(builder, val, self.value.type, "i64")
+            fmt_ptr = builder.bitcast(ctx["fmt_int"], ir.PointerType(I8))
+            builder.call(ctx["printf"], [fmt_ptr, val])
+        else:
+            str_true_ptr = builder.bitcast(ctx["str_true"], ir.PointerType(I8))
+            str_false_ptr = builder.bitcast(ctx["str_false"], ir.PointerType(I8))
+            s_ptr = builder.select(val, str_true_ptr, str_false_ptr)
+            fmt_ptr = builder.bitcast(ctx["fmt_str"], ir.PointerType(I8))
+            builder.call(ctx["printf"], [fmt_ptr, s_ptr])
+            
         builder.ret(ir.Constant(I32, 0))
 
 
@@ -380,7 +417,7 @@ class Parser:
                 toks = toks[:-1]
             if not toks:
                 continue
-            
+                
             self.toks = toks
             self.pos = 0
             first = toks[0]
@@ -573,7 +610,10 @@ class SemanticChecker:
             node.type = "bool"
 
     def visit_const(self, node):
-        node.type = "i64" if node.value > 4294967295 else "i32"
+        if node.value > 4294967295:
+            node.type = "i64"
+        else:
+            node.type = "i32"
 
     def visit_var(self, node):
         if node.name not in self.symbols:
@@ -584,6 +624,15 @@ class SemanticChecker:
 
     def visit_bool(self, node):
         node.type = "bool"
+
+
+def build_global_str(module, name, text):
+    b = text.encode("ascii") + b"\0"
+    g = ir.GlobalVariable(module, ir.ArrayType(I8, len(b)), name=name)
+    g.linkage = "private"
+    g.global_constant = True
+    g.initializer = ir.Constant(ir.ArrayType(I8, len(b)), bytearray(b))
+    return g
 
 
 def main():
@@ -610,7 +659,7 @@ def main():
             sys.exit(1)
         input_path = args[0]
         output_path = args[1]
-
+    
     module = ir.Module(name="practice4")
     module.triple = llvm.get_default_triple()
     
@@ -621,12 +670,13 @@ def main():
     printf_type = ir.FunctionType(I32, [ir.PointerType(I8)], var_arg=True)
     printf = ir.Function(module, printf_type, name="printf")
     
-    fmt_data = bytearray(b"Program exit with result %d\n\0")
-    fmt_type = ir.ArrayType(I8, len(fmt_data))
-    fmt = ir.GlobalVariable(module, fmt_type, name="fmt")
-    fmt.linkage = "private"
-    fmt.global_constant = True
-    fmt.initializer = ir.Constant(fmt_type, fmt_data)
+    ctx = {
+        "printf": printf,
+        "fmt_int": build_global_str(module, "fmt_int", "Program exit with result %lld\n"),
+        "fmt_str": build_global_str(module, "fmt_str", "Program exit with result %s\n"),
+        "str_true": build_global_str(module, "str_true", "true"),
+        "str_false": build_global_str(module, "str_false", "false")
+    }
 
     try:
         with open(input_path, "rb") as source:
@@ -648,11 +698,6 @@ def main():
         checker = SemanticChecker()
         tree.accept(checker)
 
-        ctx = {
-            "printf": printf,
-            "fmt": fmt
-        }
-        
         tree.codegen(builder, ctx)
         
         with open(output_path, "w") as out:

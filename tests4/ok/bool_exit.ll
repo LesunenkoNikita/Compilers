@@ -5,14 +5,14 @@ target datalayout = ""
 define i32 @"main"()
 {
 entry:
-  %"x" = alloca i32
-  %"multmp" = mul i32 3, 4
-  %"addtmp" = add i32 2, %"multmp"
-  store i32 %"addtmp", i32* %"x"
-  %"x_val" = load i32, i32* %"x"
-  %"wide" = sext i32 %"x_val" to i64
-  %".3" = bitcast [31 x i8]* @"fmt_int" to i8*
-  %".4" = call i32 (i8*, ...) @"printf"(i8* %".3", i64 %"wide")
+  %"x" = alloca i1
+  store i1 1, i1* %"x"
+  %"x_val" = load i1, i1* %"x"
+  %".3" = bitcast [5 x i8]* @"str_true" to i8*
+  %".4" = bitcast [6 x i8]* @"str_false" to i8*
+  %".5" = select  i1 %"x_val", i8* %".3", i8* %".4"
+  %".6" = bitcast [29 x i8]* @"fmt_str" to i8*
+  %".7" = call i32 (i8*, ...) @"printf"(i8* %".6", i8* %".5")
   ret i32 0
 }
 
