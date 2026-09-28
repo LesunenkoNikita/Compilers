@@ -202,7 +202,7 @@ class Parser:
         else: raise CompileError(f"line {tok.line}:{tok.col}: cannot start a statement with '{tok.text}'")
 
     def parse_decl(self):
-        start = self.eat()
+        self.eat() # discard 'i32'
         mutable = False
         tok = self.peek()
         if tok is not None and tok.text == "mut":
@@ -227,7 +227,7 @@ class Parser:
             raise CompileError(f"line {line}:{col}: variable '{name.text}' needs an initialiser in {{}}")
         self.eat()
         
-        return DeclNode(start.line, start.col, name.text, mutable, init)
+        return DeclNode(name.line, name.col, name.text, mutable, init)
 
     def parse_assign(self):
         name = self.expect("identifier", "a variable name")
@@ -264,8 +264,7 @@ class Parser:
         tok = self.peek()
         if tok is None:
             last = self.toks[-1] if self.toks else Token("error", "", 1, 1)
-            raise CompileError(f"line {last.line}:{last.col + len(last.text)}: expected a constant or a variable")
-        
+            raise CompileError(f"line {last.line}:{last.col + len(last.text)}: expected a constant or a variable, found end of line")
         if tok.kind == "constant":
             self.eat()
             return ConstNode(tok.line, tok.col, int(tok.text))
@@ -273,26 +272,28 @@ class Parser:
             self.eat()
             return VarNode(tok.line, tok.col, tok.text)
         else:
-            if tok.text == "}":
-                raise CompileError(f"line {tok.line}:{tok.col}: expected a constant or a variable")
-            
             raise CompileError(f"line {tok.line}:{tok.col}: expected a constant or a variable, got '{tok.text}'")
 
 def main():
     args = sys.argv[1:]
     print_ast = False
+    print_tokens = False
+    
+    if "--tokens" in args:
+        print_tokens = True
+        args.remove("--tokens")
     if "--ast" in args:
         print_ast = True
         args.remove("--ast")
 
-    if print_ast:
+    if print_ast or print_tokens:
         if len(args) != 1:
-            print(f"usage: {sys.argv[0]} [--ast] input.txt", file=sys.stderr)
+            print(f"usage: {sys.argv[0]} [--tokens | --ast] input.txt", file=sys.stderr)
             sys.exit(1)
         input_path, output_path = args[0], None
     else:
         if len(args) != 2:
-            print(f"usage: {sys.argv[0]} [--ast] input.txt output.ll", file=sys.stderr)
+            print(f"usage: {sys.argv[0]} [--tokens | --ast] input.txt output.ll", file=sys.stderr)
             sys.exit(1)
         input_path, output_path = args[0], args[1]
 
@@ -310,11 +311,20 @@ def main():
 
     try:
         with open(input_path, "rb") as source: lines = lex(source.read())
+        
+        if print_tokens:
+            for line_tokens in lines:
+                for token in line_tokens:
+                    print(f"({token.text}, {token.kind}, {token.line}:{token.col})")
+            sys.exit(0)
+
         parser = Parser(lines)
         tree = parser.parse_program()
+        
         if print_ast:
             tree.dump()
             sys.exit(0)
+            
         symbols = {}
         tree.codegen(builder, symbols, printf, fmt)
         with open(output_path, "w") as output:
