@@ -722,9 +722,13 @@ class Parser:
 
 class SemanticChecker:
     def __init__(self):
-        # We retain the simple Week 4 scope logic for Task 1
-        # Task 2 is what formally introduces the scope stack.
-        self.symbols = {}
+        self.scopes = [{}]
+
+    def lookup(self, node, name):
+        for frame in reversed(self.scopes):
+            if name in frame:
+                return frame[name]
+        raise CompileError(f"line {node.line}:{node.col}: variable '{name}' is used before its declaration")
 
     def check_assignable(self, expr, want, at, what):
         have = expr.type
@@ -743,27 +747,42 @@ class SemanticChecker:
         node.exit_node.accept(self)
 
     def visit_block(self, node):
-        pass
+        self.scopes.append({})
+        for s in node.statements:
+            s.accept(self)
+        if node.exit_node:
+            node.exit_node.accept(self)
+        self.scopes.pop()
 
     def visit_if(self, node):
-        pass
+        node.cond.accept(self)
+        if node.cond.type != "bool":
+            raise CompileError(f"line {node.cond.line}:{node.cond.col}: the condition of 'if' must be bool, got {node.cond.type}")
+            
+        node.then_block.accept(self)
+        if node.else_block:
+            node.else_block.accept(self)
 
     def visit_while(self, node):
-        pass
+        node.cond.accept(self)
+        if node.cond.type != "bool":
+            raise CompileError(f"line {node.cond.line}:{node.cond.col}: the condition of 'while' must be bool, got {node.cond.type}")
+            
+        node.body_block.accept(self)
 
     def visit_decl(self, node):
-        if node.name in self.symbols:
-            raise CompileError(f"line {node.line}:{node.col}: variable '{node.name}' is declared twice")
+        top_frame = self.scopes[-1]
+        
+        if node.name in top_frame:
+            raise CompileError(f"line {node.line}:{node.col}: variable '{node.name}' is already declared in this block")
             
         node.init.accept(self)
         self.check_assignable(node.init, node.type_name, node, f"initialise '{node.name}'")
-        self.symbols[node.name] = node
+        top_frame[node.name] = node
 
     def visit_assign(self, node):
-        if node.name not in self.symbols:
-            raise CompileError(f"line {node.line}:{node.col}: variable '{node.name}' is used before its declaration")
-            
-        decl = self.symbols[node.name]
+        decl = self.lookup(node, node.name)
+        
         if not decl.mutable:
             raise CompileError(f"line {node.line}:{node.col}: cannot assign to '{node.name}': it is not mut")
             
@@ -795,7 +814,10 @@ class SemanticChecker:
             node.type = "bool"
 
     def visit_not(self, node):
-        pass
+        node.operand.accept(self)
+        if node.operand.type != "bool":
+            raise CompileError(f"line {node.line}:{node.col}: cannot apply '!' to {node.operand.type}")
+        node.type = "bool"
 
     def visit_const(self, node):
         if node.value <= 2147483647:
@@ -806,10 +828,7 @@ class SemanticChecker:
             raise CompileError(f"line {node.line}:{node.col}: constant {node.value} does not fit in i64")
 
     def visit_var(self, node):
-        if node.name not in self.symbols:
-            raise CompileError(f"line {node.line}:{node.col}: variable '{node.name}' is used before its declaration")
-            
-        node.decl = self.symbols[node.name]
+        node.decl = self.lookup(node, node.name)
         node.type = node.decl.type_name
 
     def visit_bool(self, node):
