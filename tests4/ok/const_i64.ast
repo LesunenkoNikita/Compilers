@@ -1,0 +1,5 @@
+Program
+  Decl x i64 const
+    Const 4294967296
+  Exit
+    Var x

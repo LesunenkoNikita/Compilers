@@ -1,0 +1,13 @@
+Program
+  Decl x i32 const
+    Const 10
+  Decl y i32 mut
+    BinOp +
+      Var x
+      Const 5
+  Assign y
+    BinOp *
+      Var y
+      Const 2
+  Exit
+    Var y

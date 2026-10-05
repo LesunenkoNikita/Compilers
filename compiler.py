@@ -291,7 +291,8 @@ class NotNode(ExprNode):
         return visitor.visit_not(self)
 
     def codegen(self, builder, ctx):
-        pass
+        val = self.operand.codegen(builder, ctx)
+        return builder.not_(val, name="nottmp")
 
 
 class DeclNode(StmtNode):
@@ -311,6 +312,11 @@ class DeclNode(StmtNode):
         return visitor.visit_decl(self)
 
     def codegen(self, builder, ctx):
+        fn = builder.function
+        entry_bb = fn.entry_basic_block
+        curr_bb = builder.block
+        
+        builder.position_at_start(entry_bb)
         if self.type_name == "i64":
             t = I64
         elif self.type_name == "bool":
@@ -319,6 +325,8 @@ class DeclNode(StmtNode):
             t = I32
 
         self.storage = builder.alloca(t, name=self.name)
+        
+        builder.position_at_end(curr_bb)
         val = coerce(builder, self.init.codegen(builder, ctx), self.init.type, self.type_name)
         builder.store(val, self.storage)
 
@@ -387,7 +395,10 @@ class BlockNode(Node):
         return visitor.visit_block(self)
 
     def codegen(self, builder, ctx):
-        pass
+        for s in self.statements:
+            s.codegen(builder, ctx)
+        if self.exit_node:
+            self.exit_node.codegen(builder, ctx)
 
 
 class IfNode(StmtNode):
@@ -408,7 +419,27 @@ class IfNode(StmtNode):
         return visitor.visit_if(self)
 
     def codegen(self, builder, ctx):
-        pass
+        cond_val = self.cond.codegen(builder, ctx)
+        fn = builder.function
+        
+        then_bb = fn.append_basic_block("then")
+        else_bb = fn.append_basic_block("else") if self.else_block else None
+        merge_bb = fn.append_basic_block("merge")
+        
+        builder.cbranch(cond_val, then_bb, else_bb or merge_bb)
+        
+        builder.position_at_end(then_bb)
+        self.then_block.codegen(builder, ctx)
+        if not builder.block.is_terminated:
+            builder.branch(merge_bb)
+            
+        if self.else_block:
+            builder.position_at_end(else_bb)
+            self.else_block.codegen(builder, ctx)
+            if not builder.block.is_terminated:
+                builder.branch(merge_bb)
+                
+        builder.position_at_end(merge_bb)
 
 
 class WhileNode(StmtNode):
@@ -426,7 +457,23 @@ class WhileNode(StmtNode):
         return visitor.visit_while(self)
 
     def codegen(self, builder, ctx):
-        pass
+        fn = builder.function
+        cond_bb = fn.append_basic_block("while_cond")
+        body_bb = fn.append_basic_block("while_body")
+        end_bb = fn.append_basic_block("while_end")
+        
+        builder.branch(cond_bb)
+        
+        builder.position_at_end(cond_bb)
+        cond_val = self.cond.codegen(builder, ctx)
+        builder.cbranch(cond_val, body_bb, end_bb)
+        
+        builder.position_at_end(body_bb)
+        self.body_block.codegen(builder, ctx)
+        if not builder.block.is_terminated:
+            builder.branch(cond_bb)
+            
+        builder.position_at_end(end_bb)
 
 
 class ProgramNode(Node):

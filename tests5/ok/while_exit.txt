@@ -1,0 +1,10 @@
+i32 mut i { 1 }
+while true
+{
+if i == 5
+{
+exit i
+}
+i := i + 1
+}
+exit 0
