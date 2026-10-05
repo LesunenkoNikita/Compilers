@@ -610,10 +610,12 @@ class SemanticChecker:
             node.type = "bool"
 
     def visit_const(self, node):
-        if node.value > 4294967295:
+        if node.value <= 2147483647:
+            node.type = "i32"
+        elif node.value <= 9223372036854775807:
             node.type = "i64"
         else:
-            node.type = "i32"
+            raise CompileError(f"line {node.line}:{node.col}: constant {node.value} does not fit in i64")
 
     def visit_var(self, node):
         if node.name not in self.symbols:
