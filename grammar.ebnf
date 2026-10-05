@@ -1,10 +1,13 @@
 program ::= { statement } exit
-statement ::= decl | assign
+statement ::= decl | assign | if | while
 decl ::= type [ "mut" ] ident "{" expr "}"
 assign ::= ident ":=" expr
+if ::= "if" expr NL block [ "else" NL block ]
+while ::= "while" expr NL block
+block ::= "{" NL [ { statement } exit NL ] "}" NL
 expr ::= arith [ ( "==" | "!=" ) arith ]
 arith ::= term { ( "+" | "-" ) term }
 term ::= factor { "*" factor }
-factor ::= number | "true" | "false" | ident
+factor ::= number | "true" | "false" | ident | "!" factor
 exit ::= "exit" factor
 type ::= "i32" | "i64" | "bool"
