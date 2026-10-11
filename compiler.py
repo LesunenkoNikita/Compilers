@@ -525,7 +525,7 @@ class Parser:
     def expect(self, kind, what):
         tok = self.peek()
         if tok is None or tok.kind != kind:
-            t = tok or (self.lines[-1][-1] if self.lines and self.lines[-1] else Token("", "", 1, 1))
+            t = tok or self.lines[self.lidx][-1]
             col_offset = len(t.text) if not tok else 0
             raise CompileError(f"line {t.line}:{t.col + col_offset}: expected {what}")
         return self.eat()
@@ -580,10 +580,9 @@ class Parser:
         else:
             raise CompileError(f"line {tok.line}:{tok.col}: cannot start a statement with '{tok.text}'")
 
-    def parse_block(self):
+    def parse_block(self, start_tok):
         stmts = []
         exit_node = None
-        start_tok = self.peek()
 
         while self.lidx < len(self.lines):
             tok = self.peek()
@@ -621,13 +620,14 @@ class Parser:
         tok = self.peek()
         if not tok or tok.kind != "lbrace":
             t = tok or Token("", "end of line", self.lines[-1][-1].line + 1, 1)
-            raise CompileError(f"line {t.line}:{t.col}: expected '{{' on its own line after 'if', got '{t.text}'")
+            got_str = f"'{tok.text}'" if tok else "end of line"
+            raise CompileError(f"line {t.line}:{t.col}: expected '{{' on its own line after 'if', got {got_str}")
             
-        self.eat()
+        lbrace = self.eat()
         self.check_eol()
         self.next_line()
 
-        then_block = self.parse_block()
+        then_block = self.parse_block(lbrace)
         else_block = None
 
         tok = self.peek()
@@ -641,11 +641,11 @@ class Parser:
                 t2 = tok2 or Token("", "end of line", self.lines[-1][-1].line + 1, 1)
                 raise CompileError(f"line {t2.line}:{t2.col}: expected '{{' on its own line after 'else'")
                 
-            self.eat()
+            else_lbrace = self.eat()
             self.check_eol()
             self.next_line()
 
-            else_block = self.parse_block()
+            else_block = self.parse_block(else_lbrace)
 
         return IfNode(start.line, start.col, cond, then_block, else_block)
 
@@ -658,13 +658,14 @@ class Parser:
         tok = self.peek()
         if not tok or tok.kind != "lbrace":
             t = tok or Token("", "end of line", self.lines[-1][-1].line + 1, 1)
-            raise CompileError(f"line {t.line}:{t.col}: expected '{{' on its own line after 'while', got '{t.text}'")
+            got_str = f"'{tok.text}'" if tok else "end of line"
+            raise CompileError(f"line {t.line}:{t.col}: expected '{{' on its own line after 'while', got {got_str}")
             
-        self.eat()
+        lbrace = self.eat()
         self.check_eol()
         self.next_line()
 
-        body_block = self.parse_block()
+        body_block = self.parse_block(lbrace)
         return WhileNode(start.line, start.col, cond, body_block)
 
     def parse_decl(self):
@@ -680,7 +681,7 @@ class Parser:
         
         tok = self.peek()
         if not tok or tok.kind != "lbrace":
-            t = tok or (self.lines[-1][-1] if self.lines and self.lines[-1] else Token("", "", 1, 1))
+            t = tok or name
             col_offset = len(t.text) if not tok else 0
             raise CompileError(f"line {t.line}:{t.col + col_offset}: variable '{name.text}' needs an initialiser in {{}}")
         self.eat()
@@ -689,9 +690,10 @@ class Parser:
         
         tok = self.peek()
         if not tok or tok.kind != "rbrace":
-            t = tok or (self.lines[-1][-1] if self.lines and self.lines[-1] else Token("", "", 1, 1))
-            col_offset = len(t.text) if not tok else 0
-            raise CompileError(f"line {t.line}:{t.col + col_offset}: variable '{name.text}' needs an initialiser in {{}}")
+            t = tok or self.lines[self.lidx][-1]
+            if not tok:
+                raise CompileError(f"line {t.line}:{t.col + len(t.text)}: expected '}}', found end of line")
+            raise CompileError(f"line {t.line}:{t.col}: variable '{name.text}' needs an initialiser in {{}}")
         self.eat()
         
         return DeclNode(name.line, name.col, name.text, type_tok.text, mutable, init)
@@ -749,7 +751,7 @@ class Parser:
         tok = self.peek()
         
         if tok is None:
-            last = self.lines[-1][-1]
+            last = self.lines[self.lidx][-1]
             raise CompileError(f"line {last.line}:{last.col + len(last.text)}: expected a constant or a variable, found end of line")
             
         self.eat()
@@ -804,7 +806,7 @@ class SemanticChecker:
     def visit_if(self, node):
         node.cond.accept(self)
         if node.cond.type != "bool":
-            raise CompileError(f"line {node.cond.line}:{node.cond.col}: the condition of 'if' must be bool, got {node.cond.type}")
+            raise CompileError(f"line {node.line}:{node.col}: the condition of 'if' must be bool, got {node.cond.type}")
             
         node.then_block.accept(self)
         if node.else_block:
@@ -813,7 +815,7 @@ class SemanticChecker:
     def visit_while(self, node):
         node.cond.accept(self)
         if node.cond.type != "bool":
-            raise CompileError(f"line {node.cond.line}:{node.cond.col}: the condition of 'while' must be bool, got {node.cond.type}")
+            raise CompileError(f"line {node.line}:{node.col}: the condition of 'while' must be bool, got {node.cond.type}")
             
         node.body_block.accept(self)
 

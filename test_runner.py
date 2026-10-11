@@ -4,7 +4,7 @@ import subprocess
 import glob
 
 
-def update_ast(test_file):
+def check_ast(test_file):
     ast_file = test_file.replace(".txt", ".ast")
     
     ast_comp = subprocess.run(
@@ -13,22 +13,22 @@ def update_ast(test_file):
         text=True
     )
     
-    if ast_comp.returncode == 0:
-        new_ast = ast_comp.stdout
-        if os.path.exists(ast_file):
-            with open(ast_file, "r") as f:
-                old_ast = f.read()
-            if old_ast != new_ast:
-                with open(ast_file, "w") as f:
-                    f.write(new_ast)
-                return "AST updated"
-            else:
-                return ""
-        else:
+    if ast_comp.returncode != 0:
+        return False, "AST generation failed", ast_comp.stderr
+        
+    new_ast = ast_comp.stdout
+    if os.path.exists(ast_file):
+        with open(ast_file, "r") as f:
+            old_ast = f.read()
+        if old_ast != new_ast:
             with open(ast_file, "w") as f:
                 f.write(new_ast)
-            return "AST created"
-    return "AST generation failed"
+            return True, "AST updated", ""
+        return True, "AST matched", ""
+    else:
+        with open(ast_file, "w") as f:
+            f.write(new_ast)
+        return True, "AST created", ""
 
 
 def main():
@@ -69,7 +69,6 @@ def main():
             text=True
         )
 
-        ast_msg = ""
         if comp.returncode != 0:
             actual = comp.stderr
         else:
@@ -79,15 +78,23 @@ def main():
                 text=True
             )
             actual = exec_run.stdout + exec_run.stderr
-            
-            ast_msg = update_ast(test_file)
 
         if actual == expected:
-            msg = f"[{test_file}] PASSED"
-            if ast_msg:
-                msg += f" ({ast_msg})"
-            print(msg)
-            passed += 1
+            if comp.returncode == 0:
+                ast_ok, ast_msg, err_detail = check_ast(test_file)
+                if ast_ok:
+                    msg = f"[{test_file}] PASSED"
+                    if ast_msg != "AST matched":
+                        msg += f" ({ast_msg})"
+                    print(msg)
+                    passed += 1
+                else:
+                    print(f"[{test_file}] FAILED (AST Error)")
+                    print(err_detail, end="")
+                    failed += 1
+            else:
+                print(f"[{test_file}] PASSED")
+                passed += 1
         else:
             print(f"[{test_file}] FAILED")
             print("--- EXPECTED ---")
