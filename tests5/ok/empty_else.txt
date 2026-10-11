@@ -1,0 +1,6 @@
+i32 mut x { 1 }
+if false
+{
+x := 2
+}
+exit x

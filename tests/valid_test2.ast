@@ -1,0 +1,7 @@
+Program
+  Decl x i32 mut
+    Const 5
+  Assign x
+    Const 10
+  Exit
+    Var x
