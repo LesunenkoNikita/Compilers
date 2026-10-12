@@ -1,0 +1,12 @@
+struct Point
+{
+    i32 mut x
+    i32 mut y
+}
+fn isXZero := (Point p) -> bool
+{
+    bool zero{p.x == 0}
+    exit zero
+}
+Point p{0, 7}
+exit isXZero(p)

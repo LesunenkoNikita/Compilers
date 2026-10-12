@@ -15,3 +15,87 @@ https://share.gemini.google/ZAubeFQDEyXD
 Practice 5:
 
 https://share.gemini.google/DNL6omKl2WLP
+
+Practice 6:
+
+Tools: an AI assistant generated the first versions of task1.py, task2.py, week6compiler.py and week6grammar.ebnf. Claude Code (Claude Opus 5.5) then reviewed and fixed them, wrote the tests and restyled the error messages.
+
+Gemini link where the first week 6 files were generated:
+
+https://share.gemini.google/3KrmeTcJxh8R
+
+
+Prompt 1 (Claude Code):
+"check the correctness of the implementation for each task and ebnf, its' strict following of the week 6 practice instruction file. grammar.ebnf is a week5 grammar file, compiler.py is a week5 compiler, task 1 and task 2 are files with task 1 & 2 for week 6. bypass file edit approving, auto approve every file change, but change only task1, task2, week6 ebnf, week6compiler. don't send me the refactored code, only state with bulleted list the mistakes made before and what you changed."
+
+Summary of the answer:
+None of the generated week 6 files could compile the PDF's own example programs, and week6compiler.py also broke ordinary week 5 programs. Checked with lli: the PDF examples now print true, 55, 28 and 36; 38 week 5 error programs give the same messages and line:col as compiler.py (except i32 a{1, 2}, where ',' is now a real token); 38 week 6 error programs are reported at the right line.
+- week6grammar.ebnf:
+  - fn used ":" instead of ":=". Fixed.
+  - decl allowed only one item in {}. It is now "{" init { "," init } "}" with init ::= expr | "{" init { "," init } "}" for the additional task.
+  - factor, assign, field and call were rewritten to match the PDF.
+- Shared mistakes in task1.py, task2.py and week6compiler.py:
+  - "Point p{10, 20}" didn't parse: a declaration was only recognised when the type was followed by mut or {, never by a name. The same check turned x{5} into a declaration and changed the week 5 error.
+  - Whole-object := wasn't checked for mut on every field at every depth.
+  - Structs were accepted in p + 1, p == q and a top-level exit p, which crashed or produced invalid IR.
+  - A struct containing itself had no clear error, and struct or fn after exit was accepted.
+  - Week 5 regressions: different messages or positions for i32 x{5 6}, for if/while conditions, for parse_factor at end of line, and for a missing :=.
+- task1.py: fields were filled with insertvalue. They are now written through gep by field index, into an alloca of the named struct type.
+- task2.py and week6compiler.py (functions):
+  - "fn f := (...)" didn't parse (the parser expected a lone ':'), and a lone ':' lost its week 5 error.
+  - Calling a function declared further down crashed. All signatures are now declared first, then the bodies are generated.
+  - A body without a final exit was accepted and produced invalid IR.
+  - Unknown parameter or result types caused a Python KeyError; truncated input like "fn f := (i32" raised IndexError.
+  - A body could redeclare a parameter.
+  - Some error messages were unclear.
+- week6compiler.py (task 3 and additional task):
+  - Every built-in declaration (i32 x{5}) failed, so even week 5 programs stopped compiling.
+  - Copying a whole object (Point q{p}) broke.
+  - Structs were literal types instead of named %"Point" = type {i32, i32}.
+  - i32 arguments for i64 parameters produced invalid IR: the call read the parameter's name instead of its type, so no sext was emitted.
+  - Field-write errors now point at the link that is const or unknown.
+  - Inner {} is built with insertvalue; a {} for a built-in field, or with the wrong count, is reported at that {.
+- week6compiler.py was rewritten on top of the week 5 compiler. task2.py is everything except . field access and nested {}; task1.py is the same without functions and calls. All three are readable, have no comments, keep --ast and prefix user functions with fn_ in the IR.
+
+
+Prompt 2 (Claude Code):
+"you say that only 2 files are edited, what about task1 and task2 py?"
+
+Summary of the answer:
+task1.py and task2.py were changed too; all four files have new modification times from that session. week6compiler.py and the grammar were written with the file-writing tool, so the app showed them as edits. task1.py and task2.py were built with shell commands (copy week6compiler.py, then a script removing the features each task shouldn't have yet), which the app doesn't list as edits. They are the tested versions.
+
+
+Prompt 3 (Claude Code):
+"https://github.com/LesunenkoNikita/Compilers/tree/practice-6
+consider this public repo for examples. in main branch, now lies the compiler of week 5. i need you to make the tests for week 6 with the naming convention and cases required in pdf instruction file. also, i need you to give compilation errors with the style of errors in test folders in the main branch in repo. also, i need you to refactor week2 and week6compiler in the folder so the compilation errors thrown have the style the same as the other tests in repo. also don't send me refactored code, just give me a bulleted list with changes."
+
+Summary of the answer:
+"week2" was taken to mean task2.py; task1.py got the same changes because it shares most messages. test_runner.py from the repo, run with week6compiler.py as compiler.py, passed all 59 tests: the 35 existing ones (their .ast files unchanged) and the 24 files in tests6/.
+- Tests in tests6/ok and tests6/err (the repo's testsN layout; tests/ already holds week 2), each with .txt and .expected, plus .ast for ok tests:
+  - ok, required by the PDF: nested_chain, field_write, struct_param, struct_result, nested_calls, i32_to_i64_param.
+  - ok, extra: fn_check, fib_recursive, program_structure, call_below, nested_init_ring, nested_init_mixed.
+  - err, required by the PDF: unknown_field, wrong_value_count, const_link_write, wrong_arg_count, fn_exit_type, fn_after_stmt.
+  - err, extra: const_object_write, i64_call_to_i32, nested_init_builtin, nested_init_count.
+- Error messages restyled to match the repo:
+  - "type 'Foo' is used before its declaration", "function 'g' is used before its declaration".
+  - "cannot initialise field 'x' of type i32 with a value of type bool", "cannot initialise parameter 'p' of type Point with a value of type i32", "cannot exit from 'f' of type i32 with a value of type bool".
+  - "struct 'Point' needs 2 values in {}, got 3" (an empty {} gives "got 0"); "variable 'a' needs 1 value in {}, got 2".
+  - "function 'add' needs 2 arguments, got 1".
+  - "struct 'Point' has no field 'z'", "cannot access field 'x': 'a' is not a struct, got i32".
+  - "cannot assign to 'b': field 'x' of 'B' is not mut".
+  - "the value of 'exit' at the top level must be i32, i64 or bool, got Point".
+  - "'struct' after a function or a statement", "'fn' after a statement".
+  - "cannot start a statement with a call of 'f'", "cannot declare a struct inside a block", "cannot declare a function inside a block", "function 'f' must end with 'exit'", "parameter 'a' is already declared in function 'f'".
+- Week 5 error messages are unchanged, except i32 a{1, 2}, which now reports "variable 'a' needs 1 value in {}, got 2".
+- test_runner.py always runs compiler.py, so week6compiler.py has to replace compiler.py when the branch is pushed.
+
+
+Prompt 4 (Claude Code):
+"export this conversation(my prompts and your summaries) in the ai_usage.txt in the folder"
+
+Summary of the answer:
+This file was created, keeping the Practice 2-5 links from the repo's ai_usage.txt.
+
+
+What I took as-is and what I changed:
+The Claude Code fixes, tests and restyled error messages were taken as-is after reviewing the bullet-point summaries above. The first AI-generated week 6 files were not taken as-is: they were reviewed and largely rewritten as described in the answer to Prompt 1.
