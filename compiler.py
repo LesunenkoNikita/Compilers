@@ -33,7 +33,8 @@ KEYWORDS = {
     b"if": "keyword",
     b"else": "keyword",
     b"while": "keyword",
-    b"struct": "keyword"
+    b"struct": "keyword",
+    b"fn": "keyword"
 }
 
 
@@ -48,7 +49,9 @@ def is_digit(b):
 SINGLE = {
     ord("{"): "lbrace",
     ord("}"): "rbrace",
-    ord(","): "comma"
+    ord(","): "comma",
+    ord("("): "lparen",
+    ord(")"): "rparen"
 }
 
 
@@ -129,6 +132,12 @@ def lex(data: bytes):
                 col += 1
                 continue
 
+            if b == ord("-") and i + 1 < len(data) and data[i + 1] == ord(">"):
+                tokens.append(Token("arrow", "->", line, col))
+                i += 2
+                col += 2
+                continue
+
             if b in (ord("+"), ord("-"), ord("*")):
                 tokens.append(Token("operator", chr(b), line, col))
                 i += 1
@@ -173,6 +182,10 @@ def lex(data: bytes):
         lines.append(tokens)
 
     return lines
+
+
+def plural(n, word):
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
 def llvm_type(type_name, ctx):
@@ -256,6 +269,27 @@ class VarNode(ExprNode):
 
     def codegen(self, builder, ctx):
         return builder.load(self.decl.storage, name=f"{self.name}_val")
+
+
+class CallNode(ExprNode):
+    def __init__(self, line, col, name, args):
+        super().__init__(line, col)
+        self.name = name
+        self.args = args
+
+    def dump(self, indent=0):
+        print(" " * indent + f"Call {self.name}")
+        for a in self.args:
+            a.dump(indent + 2)
+
+    def accept(self, visitor):
+        return visitor.visit_call(self)
+
+    def codegen(self, builder, ctx):
+        vals = []
+        for arg, (p_type, _) in zip(self.args, self.fn.params):
+            vals.append(coerce(builder, arg.codegen(builder, ctx), arg.type, p_type))
+        return builder.call(self.fn.ir_func, vals, name=f"{self.name}_res")
 
 
 class BinOpNode(ExprNode):
@@ -386,6 +420,10 @@ class ExitNode(StmtNode):
 
     def codegen(self, builder, ctx):
         val = self.value.codegen(builder, ctx)
+
+        if self.ret_type is not None:
+            builder.ret(coerce(builder, val, self.value.type, self.ret_type))
+            return
 
         if self.value.type in ("i32", "i64"):
             val = coerce(builder, val, self.value.type, "i64")
@@ -525,10 +563,40 @@ class StructDefNode(Node):
             f.dump(indent + 2)
 
 
+class FnDefNode(Node):
+    def __init__(self, line, col, name, params, ret_tok, body):
+        super().__init__(line, col)
+        self.name = name
+        self.params = [(t.text, n.text) for t, n in params]
+        self.param_toks = params
+        self.ret_tok = ret_tok
+        self.ret_type = ret_tok.text
+        self.body = body
+
+    def dump(self, indent=0):
+        print(" " * indent + f"Fn {self.name} -> {self.ret_type}")
+        for p_type, p_name in self.params:
+            print(" " * (indent + 2) + f"Param {p_name} {p_type}")
+        self.body.dump(indent + 2)
+
+    def declare(self, module, ctx):
+        fn_type = ir.FunctionType(llvm_type(self.ret_type, ctx), [llvm_type(t, ctx) for t, _ in self.params])
+        self.ir_func = ir.Function(module, fn_type, name=f"fn_{self.name}")
+
+    def codegen(self, ctx):
+        builder = ir.IRBuilder(self.ir_func.append_basic_block("entry"))
+        for arg, decl in zip(self.ir_func.args, self.param_decls):
+            arg.name = decl.name
+            decl.storage = builder.alloca(arg.type, name=f"{decl.name}_slot")
+            builder.store(arg, decl.storage)
+        self.body.codegen(builder, ctx)
+
+
 class ProgramNode(Node):
-    def __init__(self, line, col, structs, stmts, exit_node):
+    def __init__(self, line, col, structs, fns, stmts, exit_node):
         super().__init__(line, col)
         self.structs = structs
+        self.fns = fns
         self.stmts = stmts
         self.exit_node = exit_node
 
@@ -536,6 +604,8 @@ class ProgramNode(Node):
         print(" " * indent + "Program")
         for s in self.structs:
             s.dump(indent + 2)
+        for f in self.fns:
+            f.dump(indent + 2)
         for s in self.stmts:
             s.dump(indent + 2)
         self.exit_node.dump(indent + 2)
@@ -550,6 +620,11 @@ class ProgramNode(Node):
             stype = module.context.get_identified_type(s.name)
             stype.set_body(*[llvm_type(f.type_name, ctx) for f in s.fields])
             ctx["struct_types"][s.name] = stype
+
+        for f in self.fns:
+            f.declare(module, ctx)
+        for f in self.fns:
+            f.codegen(ctx)
 
         for s in self.stmts:
             s.codegen(builder, ctx)
@@ -624,6 +699,7 @@ class Parser:
 
     def parse_program(self):
         structs = []
+        fns = []
         stmts = []
         exit_node = None
         phase = 0
@@ -640,20 +716,25 @@ class Parser:
 
             if first.text == "struct":
                 if phase > 0:
-                    raise CompileError(f"line {first.line}:{first.col}: struct after a statement")
+                    raise CompileError(f"line {first.line}:{first.col}: 'struct' after a function or a statement")
                 structs.append(self.parse_struct())
+            elif first.text == "fn":
+                if phase > 1:
+                    raise CompileError(f"line {first.line}:{first.col}: 'fn' after a statement")
+                phase = 1
+                fns.append(self.parse_fn())
             elif first.text == "exit":
                 exit_node = self.parse_exit()
                 self.check_eol()
                 self.next_line()
             else:
-                phase = 1
+                phase = 2
                 stmts.append(self.parse_statement())
 
         if exit_node is None:
             raise CompileError("line 1:1: no exit statement")
 
-        return ProgramNode(1, 1, structs, stmts, exit_node)
+        return ProgramNode(1, 1, structs, fns, stmts, exit_node)
 
     def parse_struct(self):
         start = self.eat()
@@ -686,6 +767,38 @@ class Parser:
 
         raise CompileError(f"line {lbrace.line}:{lbrace.col}: '{{' is never closed")
 
+    def parse_fn(self):
+        start = self.eat()
+        name = self.expect("identifier", "a function name")
+        self.expect_text(":=", f"':=' after 'fn {name.text}'")
+        self.expect_text("(", "'(' before the parameters")
+
+        params = []
+        if self.peek() and self.peek().kind == "rparen":
+            self.eat()
+        else:
+            while True:
+                p_type = self.parse_type()
+                p_name = self.expect("identifier", "a parameter name")
+                params.append((p_type, p_name))
+                tok = self.peek()
+                if tok and tok.kind == "comma":
+                    self.eat()
+                    continue
+                self.expect_text(")", "',' or ')' after a parameter")
+                break
+
+        self.expect_text("->", "'->' before the result type")
+        ret_tok = self.parse_type()
+        self.check_eol()
+        self.next_line()
+
+        lbrace = self.expect_lbrace_line(f"'fn {name.text}'", ret_tok.line)
+        body = self.parse_block(lbrace)
+        if body.exit_node is None:
+            raise CompileError(f"line {body.end.line}:{body.end.col}: function '{name.text}' must end with 'exit'")
+        return FnDefNode(start.line, start.col, name.text, params, ret_tok, body)
+
     def parse_statement(self):
         tok = self.peek()
         nxt = self.peek(1)
@@ -701,8 +814,12 @@ class Parser:
         elif tok.text == "else":
             raise CompileError(f"line {tok.line}:{tok.col}: 'else' without an 'if'")
         elif tok.text == "struct":
-            raise CompileError(f"line {tok.line}:{tok.col}: a struct can be declared only at the top level")
+            raise CompileError(f"line {tok.line}:{tok.col}: cannot declare a struct inside a block")
+        elif tok.text == "fn":
+            raise CompileError(f"line {tok.line}:{tok.col}: cannot declare a function inside a block")
         elif tok.kind == "identifier":
+            if nxt and nxt.kind == "lparen":
+                raise CompileError(f"line {tok.line}:{tok.col}: cannot start a statement with a call of '{tok.text}'")
             res = self.parse_assign()
             self.check_eol()
             self.next_line()
@@ -729,7 +846,9 @@ class Parser:
                 self.next_line()
                 if not stmts and not exit_node:
                     raise CompileError(f"line {start_tok.line}:{start_tok.col}: empty block")
-                return BlockNode(start_tok.line, start_tok.col, stmts, exit_node)
+                block = BlockNode(start_tok.line, start_tok.col, stmts, exit_node)
+                block.end = tok
+                return block
 
             if exit_node is not None:
                 raise CompileError(f"line {tok.line}:{tok.col}: statement after 'exit' in the same block")
@@ -819,13 +938,12 @@ class Parser:
         lbrace = self.eat()
 
         builtin = type_tok.text in BUILTIN
-        if not builtin:
-            tok = self.peek()
-            if tok and tok.kind == "rbrace":
-                raise CompileError(f"line {lbrace.line}:{lbrace.col}: wrong number of values in {{}}")
-        inits = [self.parse_expr()]
+        if not builtin and self.peek() and self.peek().kind == "rbrace":
+            inits = []
+        else:
+            inits = [self.parse_expr()]
 
-        while self.peek() and self.peek().kind == "comma":
+        while inits and self.peek() and self.peek().kind == "comma":
             self.eat()
             inits.append(self.parse_expr())
 
@@ -890,6 +1008,27 @@ class Parser:
 
         return node
 
+    def parse_call(self, name):
+        self.eat()
+        args = []
+        if self.peek() and self.peek().kind == "rparen":
+            self.eat()
+            return CallNode(name.line, name.col, name.text, args)
+
+        while True:
+            args.append(self.parse_expr())
+            tok = self.peek()
+            if tok is None:
+                line, col = self.eol_pos()
+                raise CompileError(f"line {line}:{col}: expected ')', found end of line")
+            if tok.kind == "comma":
+                self.eat()
+                continue
+            if tok.kind == "rparen":
+                self.eat()
+                return CallNode(name.line, name.col, name.text, args)
+            raise CompileError(f"line {tok.line}:{tok.col}: expected ',' or ')', got '{tok.text}'")
+
     def parse_factor(self):
         tok = self.peek()
 
@@ -905,6 +1044,9 @@ class Parser:
         if tok.kind == "constant":
             return ConstNode(tok.line, tok.col, int(tok.text))
         elif tok.kind == "identifier":
+            nxt = self.peek()
+            if nxt and nxt.kind == "lparen":
+                return self.parse_call(tok)
             return VarNode(tok.line, tok.col, tok.text)
         elif tok.kind == "keyword" and tok.text in ("true", "false"):
             return BoolNode(tok.line, tok.col, tok.text == "true")
@@ -916,6 +1058,8 @@ class SemanticChecker:
     def __init__(self):
         self.scopes = [{}]
         self.structs = {}
+        self.functions = {}
+        self.current_fn = None
 
     def lookup(self, node, name):
         for frame in reversed(self.scopes):
@@ -925,7 +1069,7 @@ class SemanticChecker:
 
     def check_type(self, tok):
         if tok.text not in BUILTIN and tok.text not in self.structs:
-            raise CompileError(f"line {tok.line}:{tok.col}: unknown type '{tok.text}'")
+            raise CompileError(f"line {tok.line}:{tok.col}: type '{tok.text}' is used before its declaration")
 
     def check_assignable(self, expr, want, at, what):
         have = expr.type
@@ -941,7 +1085,7 @@ class SemanticChecker:
     def const_field(self, type_name):
         for f in self.structs[type_name].fields:
             if not f.mutable:
-                return f"{type_name}.{f.name}"
+                return (type_name, f.name)
             if f.type_name in self.structs:
                 inner = self.const_field(f.type_name)
                 if inner:
@@ -951,6 +1095,17 @@ class SemanticChecker:
     def visit_program(self, node):
         for s in node.structs:
             self.visit_struct_def(s)
+
+        for f in node.fns:
+            if f.name in self.functions:
+                raise CompileError(f"line {f.line}:{f.col}: function '{f.name}' is already declared")
+            for p_type, _ in f.param_toks:
+                self.check_type(p_type)
+            self.check_type(f.ret_tok)
+            self.functions[f.name] = f
+
+        for f in node.fns:
+            self.visit_fn_def(f)
 
         for s in node.stmts:
             s.accept(self)
@@ -969,6 +1124,25 @@ class SemanticChecker:
             node.index[f.name] = i
 
         self.structs[node.name] = node
+
+    def visit_fn_def(self, node):
+        frame = {}
+        node.param_decls = []
+        for p_type, p_name in node.param_toks:
+            if p_name.text in frame:
+                raise CompileError(f"line {p_name.line}:{p_name.col}: parameter '{p_name.text}' is already declared in function '{node.name}'")
+            decl = DeclNode(p_name.line, p_name.col, p_name.text, p_type, False, [], None)
+            frame[p_name.text] = decl
+            node.param_decls.append(decl)
+
+        saved = self.scopes
+        self.scopes = [frame]
+        self.current_fn = node
+        for s in node.body.statements:
+            s.accept(self)
+        node.body.exit_node.accept(self)
+        self.scopes = saved
+        self.current_fn = None
 
     def visit_block(self, node):
         self.scopes.append({})
@@ -1003,10 +1177,10 @@ class SemanticChecker:
             return True
 
         if len(items) != len(sdef.fields):
-            raise CompileError(f"line {lbrace.line}:{lbrace.col}: wrong number of values in {{}}")
+            raise CompileError(f"line {lbrace.line}:{lbrace.col}: struct '{type_name}' needs {plural(len(sdef.fields), 'value')} in {{}}, got {len(items)}")
 
         for item, field in zip(items, sdef.fields):
-            self.check_assignable(item, field.type_name, item, f"initialise field '{field.name}' of '{type_name}'")
+            self.check_assignable(item, field.type_name, item, f"initialise field '{field.name}'")
             item.target_type = field.type_name
         return False
 
@@ -1019,7 +1193,7 @@ class SemanticChecker:
 
         if node.type_name in BUILTIN:
             if len(node.inits) != 1:
-                raise CompileError(f"line {node.lbrace.line}:{node.lbrace.col}: wrong number of values in {{}}")
+                raise CompileError(f"line {node.lbrace.line}:{node.lbrace.col}: variable '{node.name}' needs 1 value in {{}}, got {len(node.inits)}")
             node.inits[0].accept(self)
             self.check_assignable(node.inits[0], node.type_name, node, f"initialise '{node.name}'")
         else:
@@ -1036,7 +1210,7 @@ class SemanticChecker:
         if decl.type_name in self.structs:
             bad = self.const_field(decl.type_name)
             if bad:
-                raise CompileError(f"line {node.line}:{node.col}: cannot assign to '{node.name}': field '{bad}' is not mut, so the whole object cannot be replaced")
+                raise CompileError(f"line {node.line}:{node.col}: cannot assign to '{node.name}': field '{bad[1]}' of '{bad[0]}' is not mut")
 
         node.value.accept(self)
         self.check_assignable(node.value, decl.type_name, node, f"assign to '{node.name}'")
@@ -1044,8 +1218,35 @@ class SemanticChecker:
 
     def visit_exit(self, node):
         node.value.accept(self)
-        if node.value.type not in BUILTIN:
-            raise CompileError(f"line {node.value.line}:{node.value.col}: exit needs a value of a built-in type, got {node.value.type}")
+        have = node.value.type
+
+        if self.current_fn is None:
+            if have not in BUILTIN:
+                raise CompileError(f"line {node.value.line}:{node.value.col}: the value of 'exit' at the top level must be i32, i64 or bool, got {have}")
+            node.ret_type = None
+            return
+
+        want = self.current_fn.ret_type
+        if isinstance(node.value, ConstNode) and want == "i32" and have == "i64":
+            raise CompileError(f"line {node.value.line}:{node.value.col}: constant {node.value.value} does not fit in {want}")
+        if not (have == want or (have == "i32" and want == "i64")):
+            raise CompileError(f"line {node.value.line}:{node.value.col}: cannot exit from '{self.current_fn.name}' of type {want} with a value of type {have}")
+        node.ret_type = want
+
+    def visit_call(self, node):
+        if node.name not in self.functions:
+            raise CompileError(f"line {node.line}:{node.col}: function '{node.name}' is used before its declaration")
+
+        fn = self.functions[node.name]
+        if len(node.args) != len(fn.params):
+            raise CompileError(f"line {node.line}:{node.col}: function '{node.name}' needs {plural(len(fn.params), 'argument')}, got {len(node.args)}")
+
+        for arg, (p_type, p_name) in zip(node.args, fn.params):
+            arg.accept(self)
+            self.check_assignable(arg, p_type, arg, f"initialise parameter '{p_name}'")
+
+        node.type = fn.ret_type
+        node.fn = fn
 
     def visit_binop(self, node):
         node.left.accept(self)
@@ -1124,7 +1325,7 @@ def main():
         input_path = args[0]
         output_path = args[1]
 
-    module = ir.Module(name="practice6_task1")
+    module = ir.Module(name="practice6_task2")
     module.triple = llvm.get_default_triple()
 
     main_func_type = ir.FunctionType(I32, [])
