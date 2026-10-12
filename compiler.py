@@ -50,6 +50,7 @@ SINGLE = {
     ord("{"): "lbrace",
     ord("}"): "rbrace",
     ord(","): "comma",
+    ord("."): "dot",
     ord("("): "lparen",
     ord(")"): "rparen"
 }
@@ -204,8 +205,10 @@ def coerce(builder, val, have, want):
     return val
 
 
-def field_ptr(builder, ptr, idx):
-    return builder.gep(ptr, [ir.Constant(I32, 0), ir.Constant(I32, idx)], inbounds=True, name="field")
+def field_ptr(builder, ptr, indices):
+    for idx in indices:
+        ptr = builder.gep(ptr, [ir.Constant(I32, 0), ir.Constant(I32, idx)], inbounds=True, name="field")
+    return ptr
 
 
 class Node:
@@ -269,6 +272,22 @@ class VarNode(ExprNode):
 
     def codegen(self, builder, ctx):
         return builder.load(self.decl.storage, name=f"{self.name}_val")
+
+
+class FieldNode(ExprNode):
+    def __init__(self, line, col, names):
+        super().__init__(line, col)
+        self.names = names
+
+    def dump(self, indent=0):
+        print(" " * indent + f"Field {'.'.join(t.text for t in self.names)}")
+
+    def accept(self, visitor):
+        return visitor.visit_field(self)
+
+    def codegen(self, builder, ctx):
+        ptr = field_ptr(builder, self.decl.storage, self.indices)
+        return builder.load(ptr, name=f"{self.names[-1].text}_val")
 
 
 class CallNode(ExprNode):
@@ -347,6 +366,28 @@ class NotNode(ExprNode):
         return builder.not_(val, name="nottmp")
 
 
+class InitListNode(Node):
+    def __init__(self, line, col, items):
+        super().__init__(line, col)
+        self.items = items
+
+    def dump(self, indent=0):
+        print(" " * indent + "InitList")
+        for item in self.items:
+            item.dump(indent + 2)
+
+
+def gen_item(item, builder, ctx):
+    if not isinstance(item, InitListNode):
+        return coerce(builder, item.codegen(builder, ctx), item.type, item.target_type)
+    if item.copy:
+        return gen_item(item.items[0], builder, ctx)
+    val = ir.Constant(llvm_type(item.type, ctx), ir.Undefined)
+    for i, sub in enumerate(item.items):
+        val = builder.insert_value(val, gen_item(sub, builder, ctx), i, name=f"{item.type}_init")
+    return val
+
+
 class DeclNode(StmtNode):
     def __init__(self, line, col, name, type_tok, mutable, inits, lbrace):
         super().__init__(line, col)
@@ -381,17 +422,18 @@ class DeclNode(StmtNode):
             val = coerce(builder, init.codegen(builder, ctx), init.type, self.type_name)
             builder.store(val, self.storage)
         elif self.copy:
-            builder.store(self.inits[0].codegen(builder, ctx), self.storage)
+            builder.store(gen_item(self.inits[0], builder, ctx), self.storage)
         else:
             for i, item in enumerate(self.inits):
-                val = coerce(builder, item.codegen(builder, ctx), item.type, item.target_type)
-                builder.store(val, field_ptr(builder, self.storage, i))
+                val = gen_item(item, builder, ctx)
+                builder.store(val, field_ptr(builder, self.storage, [i]))
 
 
 class AssignNode(StmtNode):
-    def __init__(self, line, col, name, value):
+    def __init__(self, line, col, names, value):
         super().__init__(line, col)
-        self.name = name
+        self.names = names
+        self.name = ".".join(t.text for t in names)
         self.value = value
 
     def dump(self, indent=0):
@@ -402,8 +444,9 @@ class AssignNode(StmtNode):
         return visitor.visit_assign(self)
 
     def codegen(self, builder, ctx):
-        val = coerce(builder, self.value.codegen(builder, ctx), self.value.type, self.decl.type_name)
-        builder.store(val, self.decl.storage)
+        ptr = field_ptr(builder, self.decl.storage, self.indices)
+        val = coerce(builder, self.value.codegen(builder, ctx), self.value.type, self.target_type)
+        builder.store(val, ptr)
 
 
 class ExitNode(StmtNode):
@@ -919,6 +962,32 @@ class Parser:
         body_block = self.parse_block(lbrace)
         return WhileNode(start.line, start.col, cond, body_block)
 
+    def parse_item(self):
+        tok = self.peek()
+        if tok and tok.kind == "lbrace":
+            return self.parse_init_list()
+        return self.parse_expr()
+
+    def parse_init_list(self):
+        lbrace = self.eat()
+        if self.peek() and self.peek().kind == "rbrace":
+            self.eat()
+            return InitListNode(lbrace.line, lbrace.col, [])
+
+        items = [self.parse_item()]
+        while self.peek() and self.peek().kind == "comma":
+            self.eat()
+            items.append(self.parse_item())
+
+        tok = self.peek()
+        if not tok:
+            line, col = self.eol_pos()
+            raise CompileError(f"line {line}:{col}: expected '}}', found end of line")
+        if tok.kind != "rbrace":
+            raise CompileError(f"line {tok.line}:{tok.col}: expected ',' or '}}', got '{tok.text}'")
+        self.eat()
+        return InitListNode(lbrace.line, lbrace.col, items)
+
     def parse_decl(self):
         type_tok = self.eat()
         mutable = False
@@ -938,14 +1007,14 @@ class Parser:
         lbrace = self.eat()
 
         builtin = type_tok.text in BUILTIN
-        if not builtin and self.peek() and self.peek().kind == "rbrace":
-            inits = []
-        else:
+        if builtin:
             inits = [self.parse_expr()]
+        else:
+            inits = [] if self.peek() and self.peek().kind == "rbrace" else [self.parse_item()]
 
         while inits and self.peek() and self.peek().kind == "comma":
             self.eat()
-            inits.append(self.parse_expr())
+            inits.append(self.parse_expr() if builtin else self.parse_item())
 
         tok = self.peek()
         if not tok or tok.kind != "rbrace":
@@ -959,18 +1028,27 @@ class Parser:
 
         return DeclNode(name.line, name.col, name.text, type_tok, mutable, inits, lbrace)
 
+    def parse_chain_rest(self, first):
+        names = [first]
+        while self.peek() and self.peek().kind == "dot":
+            self.eat()
+            names.append(self.expect("identifier", "a field name after '.'"))
+        return names
+
     def parse_assign(self):
         name = self.expect("identifier", "a variable name")
+        names = self.parse_chain_rest(name)
+        last = names[-1]
         tok = self.peek()
 
         if tok is None or tok.text != ":=":
-            t = tok or name
+            t = tok or last
             col_offset = len(t.text) if not tok else 0
             got_str = 'end of line' if not tok else repr(tok.text)
-            raise CompileError(f"line {t.line}:{t.col + col_offset}: expected ':=' after '{name.text}', got {got_str}")
+            raise CompileError(f"line {t.line}:{t.col + col_offset}: expected ':=' after '{last.text}', got {got_str}")
 
         self.eat()
-        return AssignNode(name.line, name.col, name.text, self.parse_expr())
+        return AssignNode(name.line, name.col, names, self.parse_expr())
 
     def parse_exit(self):
         start = self.eat()
@@ -1047,6 +1125,8 @@ class Parser:
             nxt = self.peek()
             if nxt and nxt.kind == "lparen":
                 return self.parse_call(tok)
+            if nxt and nxt.kind == "dot":
+                return FieldNode(tok.line, tok.col, self.parse_chain_rest(tok))
             return VarNode(tok.line, tok.col, tok.text)
         elif tok.kind == "keyword" and tok.text in ("true", "false"):
             return BoolNode(tok.line, tok.col, tok.text == "true")
@@ -1091,6 +1171,23 @@ class SemanticChecker:
                 if inner:
                     return inner
         return None
+
+    def resolve_chain(self, decl, names):
+        curr_type = decl.type_name
+        indices = []
+        links = []
+        for prev, tok in zip(names, names[1:]):
+            if curr_type not in self.structs:
+                raise CompileError(f"line {tok.line}:{tok.col}: cannot access field '{tok.text}': '{prev.text}' is not a struct, got {curr_type}")
+            sdef = self.structs[curr_type]
+            if tok.text not in sdef.index:
+                raise CompileError(f"line {tok.line}:{tok.col}: struct '{curr_type}' has no field '{tok.text}'")
+            idx = sdef.index[tok.text]
+            field = sdef.fields[idx]
+            indices.append(idx)
+            links.append((tok, field))
+            curr_type = field.type_name
+        return curr_type, indices, links
 
     def visit_program(self, node):
         for s in node.structs:
@@ -1170,18 +1267,31 @@ class SemanticChecker:
 
     def check_init(self, items, type_name, lbrace):
         sdef = self.structs[type_name]
-        for item in items:
-            item.accept(self)
+        first = items[0] if items else None
+        checked = False
 
-        if len(items) == 1 and items[0].type == type_name:
-            return True
+        if len(items) == 1 and not isinstance(first, InitListNode):
+            first.accept(self)
+            checked = True
+            if first.type == type_name:
+                first.target_type = type_name
+                return True
 
         if len(items) != len(sdef.fields):
             raise CompileError(f"line {lbrace.line}:{lbrace.col}: struct '{type_name}' needs {plural(len(sdef.fields), 'value')} in {{}}, got {len(items)}")
 
-        for item, field in zip(items, sdef.fields):
-            self.check_assignable(item, field.type_name, item, f"initialise field '{field.name}'")
-            item.target_type = field.type_name
+        for i, (item, field) in enumerate(zip(items, sdef.fields)):
+            if isinstance(item, InitListNode):
+                if field.type_name in BUILTIN:
+                    raise CompileError(f"line {item.line}:{item.col}: cannot initialise field '{field.name}' of type {field.type_name} with {{}}")
+                item.copy = self.check_init(item.items, field.type_name, item)
+                item.type = field.type_name
+                item.target_type = field.type_name
+            else:
+                if not (i == 0 and checked):
+                    item.accept(self)
+                self.check_assignable(item, field.type_name, item, f"initialise field '{field.name}'")
+                item.target_type = field.type_name
         return False
 
     def visit_decl(self, node):
@@ -1202,18 +1312,29 @@ class SemanticChecker:
         top_frame[node.name] = node
 
     def visit_assign(self, node):
-        decl = self.lookup(node, node.name)
+        root = node.names[0]
+        decl = self.lookup(node, root.text)
 
-        if not decl.mutable:
-            raise CompileError(f"line {node.line}:{node.col}: cannot assign to '{node.name}': it is not mut")
+        if len(node.names) == 1:
+            if not decl.mutable:
+                raise CompileError(f"line {node.line}:{node.col}: cannot assign to '{node.name}': it is not mut")
+            node.target_type = decl.type_name
+            node.indices = []
+        else:
+            if not decl.mutable:
+                raise CompileError(f"line {root.line}:{root.col}: cannot assign to '{node.name}': '{root.text}' is not mut")
+            node.target_type, node.indices, links = self.resolve_chain(decl, node.names)
+            for tok, field in links:
+                if not field.mutable:
+                    raise CompileError(f"line {tok.line}:{tok.col}: cannot assign to '{node.name}': field '{tok.text}' is not mut")
 
-        if decl.type_name in self.structs:
-            bad = self.const_field(decl.type_name)
+        if node.target_type in self.structs:
+            bad = self.const_field(node.target_type)
             if bad:
                 raise CompileError(f"line {node.line}:{node.col}: cannot assign to '{node.name}': field '{bad[1]}' of '{bad[0]}' is not mut")
 
         node.value.accept(self)
-        self.check_assignable(node.value, decl.type_name, node, f"assign to '{node.name}'")
+        self.check_assignable(node.value, node.target_type, node, f"assign to '{node.name}'")
         node.decl = decl
 
     def visit_exit(self, node):
@@ -1291,6 +1412,10 @@ class SemanticChecker:
         node.decl = self.lookup(node, node.name)
         node.type = node.decl.type_name
 
+    def visit_field(self, node):
+        node.decl = self.lookup(node, node.names[0].text)
+        node.type, node.indices, _ = self.resolve_chain(node.decl, node.names)
+
     def visit_bool(self, node):
         node.type = "bool"
 
@@ -1325,7 +1450,7 @@ def main():
         input_path = args[0]
         output_path = args[1]
 
-    module = ir.Module(name="practice6_task2")
+    module = ir.Module(name="practice6")
     module.triple = llvm.get_default_triple()
 
     main_func_type = ir.FunctionType(I32, [])

@@ -1,0 +1,21 @@
+struct Point
+{
+    i32 mut x
+    i32 mut y
+}
+struct Circle
+{
+    Point center
+    i32 mut radius
+}
+fn origin := () -> Point
+{
+    Point o{0, 0}
+    exit o
+}
+Point p{3, 4}
+Circle a{{p}, 1}
+Circle b{origin(), 2}
+Circle c{{a.center.y, b.radius}, 9}
+i32 result{c.center.x + c.center.y + a.center.x}
+exit result

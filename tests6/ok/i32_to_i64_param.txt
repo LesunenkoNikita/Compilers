@@ -1,0 +1,7 @@
+fn big := (i64 n) -> i64
+{
+    i64 r{n + 5000000000}
+    exit r
+}
+i32 small{7}
+exit big(small)

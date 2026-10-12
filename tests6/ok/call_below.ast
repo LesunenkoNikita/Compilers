@@ -1,0 +1,19 @@
+Program
+  Fn first -> i32
+    Param n i32
+    Block
+      Exit
+        Call second
+          Var n
+  Fn second -> i32
+    Param n i32
+    Block
+      Decl r i32 const
+        BinOp *
+          Var n
+          Const 2
+      Exit
+        Var r
+  Exit
+    Call first
+      Const 21
