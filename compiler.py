@@ -316,6 +316,7 @@ class CallNode(ExprNode):
         super().__init__(line, col)
         self.name = name
         self.args = args
+        self.this_decl = None
 
     def dump(self, indent=0):
         print(" " * indent + f"Call {self.name}")
@@ -326,7 +327,7 @@ class CallNode(ExprNode):
         return visitor.visit_call(self)
 
     def codegen(self, builder, ctx):
-        vals = []
+        vals = [self.this_decl.storage] if self.this_decl is not None else []
         for arg, (p_type, _) in zip(self.args, self.fn.params):
             vals.append(coerce(builder, arg.codegen(builder, ctx), arg.type, p_type))
         return builder.call(self.fn.ir_func, vals, name=f"{self.name}_res")
@@ -674,6 +675,8 @@ class FnDefNode(Node):
         self.ret_tok = ret_tok
         self.ret_type = ret_tok.text
         self.body = body
+        self.mutating = False
+        self.calls_on_this = []
 
     def dump(self, indent=0):
         print(" " * indent + f"{self.kind} {self.name} -> {self.ret_type}")
@@ -1279,6 +1282,8 @@ class SemanticChecker:
         self.current_fn = None
         self.current_struct = None
         self.current_this = None
+        self.pending = []
+        self.mut_final = False
 
     def lookup_root(self, node, name):
         for frame in reversed(self.scopes):
@@ -1289,6 +1294,8 @@ class SemanticChecker:
             idx = s.index[name]
             tok = Token("identifier", name, node.line, node.col)
             return self.current_this, [idx], [(tok, s.fields[idx])]
+        if s is not None:
+            raise CompileError(f"line {node.line}:{node.col}: name '{name}' is not a parameter, a local variable or a field of '{s.name}'")
         raise CompileError(f"line {node.line}:{node.col}: variable '{name}' is used before its declaration")
 
     def resolve_path(self, node, names):
@@ -1359,12 +1366,49 @@ class SemanticChecker:
             for m in s.methods:
                 m.accept(self)
 
+        changed = True
+        while changed:
+            changed = False
+            for m in methods:
+                if not m.mutating and any(c.mutating for c in m.calls_on_this):
+                    m.mutating = True
+                    changed = True
+
+        for call, chain, bad in self.pending:
+            self.check_mutating_call(call, chain, bad)
+        self.mut_final = True
+
         for f in node.fns:
             f.accept(self)
 
         for s in node.stmts:
             s.accept(self)
         node.exit_node.accept(self)
+
+    def check_mutating_call(self, call, chain, bad):
+        if call.fn.mutating and bad is not None:
+            raise CompileError(f"line {call.line}:{call.col}: cannot call mutating '{call.name}' on '{chain}': '{bad}' is not mut")
+
+    def register_call(self, call, obj):
+        chain = None
+        bad = None
+        if obj is None:
+            self.current_fn.calls_on_this.append(call.fn)
+        elif is_addressable(obj):
+            chain = obj.name if isinstance(obj, VarNode) else ".".join(t.text for t in obj.names)
+            if not obj.decl.mutable:
+                bad = obj.name if isinstance(obj, VarNode) else obj.names[0].text
+            else:
+                for tok, field in obj.links:
+                    if not field.mutable:
+                        bad = tok.text
+                        break
+            if obj.decl is self.current_this and self.current_this is not None:
+                self.current_fn.calls_on_this.append(call.fn)
+        if self.mut_final:
+            self.check_mutating_call(call, chain, bad)
+        else:
+            self.pending.append((call, chain, bad))
 
     def check_args(self, node, fn, what):
         if len(node.args) != len(fn.params):
@@ -1506,6 +1550,8 @@ class SemanticChecker:
         for tok, field in links:
             if not field.mutable:
                 raise CompileError(f"line {tok.line}:{tok.col}: cannot assign to '{node.name}': field '{tok.text}' is not mut")
+        if decl is self.current_this and self.current_this is not None:
+            self.current_fn.mutating = True
 
         if node.target_type in self.structs:
             bad = self.const_field(node.target_type)
@@ -1534,6 +1580,16 @@ class SemanticChecker:
         node.ret_type = want
 
     def visit_call(self, node):
+        s = self.current_struct
+        if s is not None and node.name in s.method_index:
+            fn = s.method_index[node.name]
+            self.check_args(node, fn, f"member function '{node.name}' of '{s.name}'")
+            node.type = fn.ret_type
+            node.fn = fn
+            node.this_decl = self.current_this
+            self.register_call(node, None)
+            return
+
         if node.name not in self.functions:
             raise CompileError(f"line {node.line}:{node.col}: function '{node.name}' is used before its declaration")
 
@@ -1561,6 +1617,7 @@ class SemanticChecker:
         self.check_args(node, fn, f"member function '{node.name}' of '{t}'")
         node.type = fn.ret_type
         node.fn = fn
+        self.register_call(node, obj)
 
     def visit_binop(self, node):
         node.left.accept(self)
@@ -1642,7 +1699,7 @@ def main():
         input_path = args[0]
         output_path = args[1]
 
-    module = ir.Module(name="practice7_task1")
+    module = ir.Module(name="practice7_task2")
     module.triple = llvm.get_default_triple()
 
     main_func_type = ir.FunctionType(I32, [])
