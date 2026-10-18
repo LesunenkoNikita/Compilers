@@ -1,0 +1,1 @@
+compilation error: line 19:13: cannot access field 'x': the result of 'd2' is not a struct, got i32

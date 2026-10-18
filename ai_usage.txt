@@ -99,3 +99,102 @@ This file was created, keeping the Practice 2-5 links from the repo's ai_usage.t
 
 What I took as-is and what I changed:
 The Claude Code fixes, tests and restyled error messages were taken as-is after reviewing the bullet-point summaries above. The first AI-generated week 6 files were not taken as-is: they were reviewed and largely rewritten as described in the answer to Prompt 1.
+
+Practice 7:
+
+Tools: Claude Code (Claude Opus 5.5) implemented all week 7 files: task1.py, task2.py, task3.py, week7compiler.py, grammar.ebnf, the tests7 tests and the test_runner.py change.
+
+
+Prompt 1 (Claude Code):
+"bypass file edit approving, auto approve every file change. don't send me the refactored code, only state with bulleted list what you implemented and changed.
+The pdf requirements for week 7 practice are in the folder.
+Now the next practice. For each task, make one complete compiler file with changes, no commentaries inside the files, explain outside of the files how to test each task. when you implement a task, don't remove other features before it(don't leave the compiler with the only feature required in the task), remove the features only if you replace them with new functionality. the last file must be the full ready compiler for week 7 practice and additional task. also make tests for after task 3 , the required amount of valid and invalid tests with the naming convention required in the practice, with .expected files. Also after finishing additional task, make a few tests for it. All the tests for after task 3 must be the tests required by the practice file. The tests for additional task you can create on your own. Remake grammar.ebnf for it to be valid for week 7 practice.
+After week 7 implementation all the previous errors should be thrown as they were thrown in week 6, unless stated explicitly otherwise in week 7 practice. Strictly follow the pdf requirements.
+For error tests, the compilation errors style you can look in this repo in current branch:
+https://github.com/LesunenkoNikita/Compilers/tree/practice-6"
+
+Summary of the answer:
+Created task1.py, task2.py, task3.py, week7compiler.py, the tests7 tests and a new grammar.ebnf, and changed test_runner.py to pass NAME.in as standard input. With week7compiler.py as compiler.py, test_runner.py passed all 89 tests (every earlier week plus tests7). All three task files gave the same output as week 6 on 121 checks (the repo's tests plus 54 old error programs). week7compiler.py differs on two invalid programs only, because the additional task allows "." after a call. The PDF programs print 83 (task 1), the full printout for "3 4" (task 3) and 46 (additional task). All files are readable and have no comments.
+- task1.py (member function declaration and call, --ast, code generation):
+  - A struct can declare functions after its fields. A field after a member function is an error at that field; a member function before the first field is an error at its fn; a member function can't share a name with a field or another member function.
+  - obj.f(...) and c.center.d2() work wherever a value can stand, also after exit. Nothing may follow the call's ")", and a call alone is not a statement.
+  - Errors for a call on a type (Point.d2()), a call on an i32, an unknown member function, and a wrong number or type of arguments.
+  - --ast prints Member, MemberFn and MemberCall in the PDF's layout.
+  - Inside a member function names are looked up among parameters and locals first, then fields; a const field can't be assigned.
+  - Each member function becomes Point_shift in the IR with a pointer to the object as its first parameter; a call passes the object's address (its alloca, or a gep for c.center.d2()), so x := x + dx is a gep, a load, an add and a store. This code generation was put into task 1 because without it the task 1 program prints 67 instead of 83.
+- task2.py adds:
+  - f() inside a member function looks at the struct's own member functions first, so a member function hides a global with the same name.
+  - An unknown name inside a member function reports "name 'z' is not a parameter, a local variable or a field of 'Point'".
+  - The mutation rule: a member function is mutating if it assigns a field of its object or calls a mutating member function on its object or one of its fields. It is decided after all bodies are checked, repeating until nothing changes (cycles work). Calling a mutating function through a const link is an error, e.g. "cannot call mutating 'shift' on 'c.center': 'center' is not mut".
+- task3.py adds:
+  - read() returns i32 and works wherever a value can; scanf is declared like printf, with a global "%d" and an alloca in the entry block.
+  - print(arg) is a statement everywhere a statement can be. Numbers use %d / %lld, bools print true/false, string literals use %s (a % stays a %), structs print as Circle{center: Point{x: 3, y: 4}, radius: 2} by walking the fields with gep and load. printf is declared once and shared with exit.
+  - String literals in the lexer: one not closed on its line is an error at its opening ", and one outside print is an error.
+  - read and print are reserved: errors as a variable, function, parameter, field or member function name, and for p.print(), read(5), print(), print(a, b) and print used as a value.
+- week7compiler.py adds the additional task (a call in the middle of a chain):
+  - p.moved(1).shift(2), c.grown(3).radius, c.grown(1).center.d2() and origin().moved(7).x work.
+  - A field of a call result uses extractvalue; a member call on a result stores it in a temporary alloca and passes its address, so mutating calls on temporaries are allowed.
+  - A "." after a non-struct result is an error at that "."; assigning to a call result is an error.
+- Tests in tests7/ok and tests7/err (the repo's testsN layout), with .expected and .ast files:
+  - ok, required by the PDF: call_no_args, call_two_args, mutating_then_read, member_calls_member, two_level_chain_call, read_input (with read_input.in), print_every_kind; plus the PDF programs member_functions and read_and_print (with read_and_print.in).
+  - err, required by the PDF: field_after_member_fn, mutating_const_object, mutating_const_field, unknown_member_fn, wrong_arg_count, string_outside_print, print_as_value.
+  - Additional task: ok/chain_call_middle, ok/chain_call_temp_print, err/dot_after_non_struct, err/assign_to_call_result.
+- grammar.ebnf: struct member functions, print, string, member_call, read and a call_chain rule for the additional task.
+- --ast now prints struct fields as "Member ..." instead of "FieldDecl ..." (as shown in the PDF), so the runner rewrites seven tests6/ok/*.ast files ("AST updated"); they still pass.
+- How to test: python3 taskN.py --ast program.txt; python3 taskN.py program.txt output.ll && lli output.ll (add "< NAME.in" for programs that call read()); for the full suite copy week7compiler.py to compiler.py and run python3 test_runner.py.
+
+
+Prompt 2 (Claude Code):
+"i forgot to state that object passing by address has to be done by "new nodes all the way". did you chose this way? also have you changed test_runner so it accepts .in files for read() and have you added .in files for the tests where read() is called?"
+
+Summary of the answer:
+Mostly, not strictly. MemberCall was already its own node class with its own semantic and codegen methods, and nothing was rewritten into global functions. But member functions were the ordinary function node with an owner flag. Changed in all four files: MemberFn is now its own node class with its own semantic method (visit_member_fn) and codegen method. After the change all 89 runner tests still pass, the task files still match week 6 on all 121 checks, and the task 1 and task 3 outputs are unchanged.
+test_runner.py looks for NAME.in next to each test and passes it to lli as standard input (empty input otherwise). Both tests that call read() have .in files: read_input.in ("10 32" and "7") and read_and_print.in ("3 4").
+
+
+Prompt 3 (Claude Code):
+"for some reason all tests pass even tho "i32 a{f(1).x} now says f takes 0 arguments; week 6 said "needs an initialiser".
+f().x := 1 now says "cannot assign to the result of a call of 'f'"; week 6 said "cannot start a statement with a call of 'f'"."
+
+Summary of the answer:
+These two programs are not in any test folder; they were throwaway regression checks run outside the runner, and no test in the repo or tests7 has a "." after a call's ")". The messages changed because the additional task allows "." after a call: f(1).x is now a valid chain, so the real error (wrong number of arguments) is reported, and the PDF names a call result on the left of := as an error. Both programs are invalid in both weeks; only the wording changed. task1-3.py still give the week 6 messages. Offered to add them to tests7/err.
+
+
+Prompt 4 (Claude Code):
+"what is the difference between task3.py and week7compiler.py"
+
+Summary of the answer:
+The only difference is the additional task. week7compiler.py keeps parsing ".name" or ".name(...)" after the ")" of any call, adds a ResultField node (semantic check that the result is a struct, extractvalue in the IR), reuses MemberCall for calls on a result (temporary alloca, address passed as this), reports "cannot assign to the result of a call of 'moved'", and names the module practice7 instead of practice7_task3. task3.py instead reports "the call of 'moved' ends the chain, nothing can follow it".
+
+
+Prompt 5 (Claude Code):
+"python3 test_runner.py ... [tests7/ok/two_level_chain_call.txt] PASSED
+and then the script keeps running but it stays on one test and no new tests run"
+
+Summary of the answer:
+The run was stuck on a test that calls read() (read_input or read_and_print): the test_runner.py used was the old one without the .in change (or the .in files weren't copied), so lli waited for keyboard input. Gave the code block that passes NAME.in (or empty input) to lli, and the command to check that both .in files are next to their .txt files.
+
+
+Prompt 6 (Claude Code):
+"check grammar.ebnf files in the folder(there are three) and choose the one that fits week 7"
+
+Summary of the answer:
+"grammar.ebnf 00.24.13" is the week 7 grammar: grammar.ebnf is the week 5 grammar, week6grammar.ebnf.txt is week 6, and only "grammar.ebnf 00.24.13" has member functions in struct, member_call, print, string, read and call_chain. Offered to rename it to grammar.ebnf, which would replace the week 5 file.
+
+
+Prompt 7 (Claude Code):
+"so grammar.ebnf 00.24.13 this one includes everything from the past weeks + week 7?"
+
+Summary of the answer:
+Yes. It keeps every rule from weeks 2-5 (program, decl, assign, if/else, while, block, expr, arith, term, factor, exit, types) and week 6 (program order, struct, field_decl, fn, nested init, field chains, call, struct types). Week 7 extends struct, statement and factor, adds print, string, member_call, read and call_chain, and moves the argument list into its own rule args (same meaning as before).
+
+
+Prompt 8 (Claude Code):
+"now i need you to export our conversation(specifically for week 7, my prompts and summaries for your answers, the same pattern as for week 6) as text and add it to ai_usage.txt"
+
+Summary of the answer:
+This Practice 7 section was added to ai_usage.txt.
+
+
+What I took as-is and what I changed:
+The week 7 files, tests, grammar and test_runner.py change were taken as-is after reviewing the bullet-point summaries above, with one requested change: member functions were reworked to use the "new nodes all the way" approach (Prompt 2).

@@ -1,0 +1,10 @@
+-9
+6000000000
+true
+100% text \n as written
+Flags{on: true, big: 6000000000}
+Box{f: Flags{on: true, big: 6000000000}, id: 1}
+Flags{on: true, big: 6000000000}
+Box{f: Flags{on: false, big: 9000000000}, id: 7}
+inside if
+Program exit with result 0

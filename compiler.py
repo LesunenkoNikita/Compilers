@@ -408,6 +408,24 @@ class MemberCallNode(ExprNode):
         return builder.call(self.fn.ir_func, vals, name=f"{self.name}_res")
 
 
+class ResultFieldNode(ExprNode):
+    def __init__(self, line, col, obj, names):
+        super().__init__(line, col)
+        self.obj = obj
+        self.names = names
+
+    def dump(self, indent=0):
+        print(" " * indent + f"ResultField {'.'.join(t.text for t in self.names)}")
+        self.obj.dump(indent + 2)
+
+    def accept(self, visitor):
+        return visitor.visit_result_field(self)
+
+    def codegen(self, builder, ctx):
+        val = self.obj.codegen(builder, ctx)
+        return builder.extract_value(val, self.indices, name=f"{self.names[-1].text}_val")
+
+
 class ReadNode(ExprNode):
     def dump(self, indent=0):
         print(" " * indent + "Read")
@@ -1064,10 +1082,11 @@ class Parser:
         for i in range(self.tidx, len(line)):
             t = line[i]
             if t.text == ":=":
-                return None
+                return None, False
             if t.kind == "lparen" and i > self.tidx and line[i - 1].kind == "identifier":
-                return line[i - 1]
-        return None
+                assigns = any(x.text == ":=" for x in line[i:])
+                return line[i - 1], assigns
+        return None, False
 
     def parse_print(self):
         start = self.eat()
@@ -1103,8 +1122,10 @@ class Parser:
             self.next_line()
             return res
         if tok.kind == "identifier" and not (nxt and (nxt.kind == "identifier" or nxt.text == "mut")):
-            call_tok = self.find_call_in_statement()
+            call_tok, assigns = self.find_call_in_statement()
             if call_tok is not None:
+                if assigns:
+                    raise CompileError(f"line {call_tok.line}:{call_tok.col}: cannot assign to the result of a call of '{call_tok.text}'")
                 raise CompileError(f"line {call_tok.line}:{call_tok.col}: cannot start a statement with a call of '{call_tok.text}'")
         if tok.text in BUILTIN or (tok.kind == "identifier" and nxt and (nxt.kind == "identifier" or nxt.text == "mut")):
             res = self.parse_decl()
@@ -1391,6 +1412,21 @@ class Parser:
                 return VarNode(first.line, first.col, first.text)
             return FieldNode(first.line, first.col, names)
 
+    def parse_after_call(self, node):
+        while self.peek() and self.peek().kind == "dot":
+            dot = self.eat()
+            name = self.expect("identifier", "a field name after '.'")
+            nxt = self.peek()
+            if nxt and nxt.kind == "lparen":
+                node = self.parse_member_call(node, name)
+            elif isinstance(node, ResultFieldNode):
+                node.names.append(name)
+                node.dots.append(dot)
+            else:
+                node = ResultFieldNode(dot.line, dot.col, node, [name])
+                node.dots = [dot]
+        return node
+
     def parse_factor(self):
         tok = self.peek()
 
@@ -1416,12 +1452,11 @@ class Parser:
             args = self.parse_args()
             if args:
                 raise CompileError(f"line {tok.line}:{tok.col}: 'read' needs 0 arguments, got {len(args)}")
-            return ReadNode(tok.line, tok.col)
+            return self.parse_after_call(ReadNode(tok.line, tok.col))
         elif tok.kind == "identifier":
             node = self.parse_chain(tok)
-            nxt = self.peek()
-            if isinstance(node, MemberCallNode) and nxt and nxt.kind == "dot":
-                raise CompileError(f"line {nxt.line}:{nxt.col}: the call of '{node.name}' ends the chain, nothing can follow it")
+            if isinstance(node, (CallNode, MemberCallNode)):
+                node = self.parse_after_call(node)
             return node
         elif tok.kind == "keyword" and tok.text in ("true", "false"):
             return BoolNode(tok.line, tok.col, tok.text == "true")
@@ -1774,6 +1809,19 @@ class SemanticChecker:
         node.fn = fn
         self.register_call(node, obj)
 
+    def visit_result_field(self, node):
+        node.obj.accept(self)
+        curr_type = node.obj.type
+        node.indices = []
+        links = []
+        prev = node.obj.name if isinstance(node.obj, (CallNode, MemberCallNode)) else "read"
+        for dot, tok in zip(node.dots, node.names):
+            if curr_type not in self.structs:
+                raise CompileError(f"line {dot.line}:{dot.col}: cannot access field '{tok.text}': the result of '{prev}' is not a struct, got {curr_type}")
+            curr_type = self.step_field(curr_type, prev, tok, node.indices, links)
+            prev = tok.text
+        node.type = curr_type
+
     def visit_read(self, node):
         node.type = "i32"
 
@@ -1860,7 +1908,7 @@ def main():
         input_path = args[0]
         output_path = args[1]
 
-    module = ir.Module(name="practice7_task3")
+    module = ir.Module(name="practice7")
     module.triple = llvm.get_default_triple()
 
     main_func_type = ir.FunctionType(I32, [])

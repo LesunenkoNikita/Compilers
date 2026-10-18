@@ -1,0 +1,1 @@
+compilation error: line 19:9: member function 'shift' of 'Point' needs 1 argument, got 2

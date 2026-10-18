@@ -72,8 +72,14 @@ def main():
         if comp.returncode != 0:
             actual = comp.stderr
         else:
+            input_file = test_file.replace(".txt", ".in")
+            stdin_data = ""
+            if os.path.exists(input_file):
+                with open(input_file, "r") as f:
+                    stdin_data = f.read()
             exec_run = subprocess.run(
                 ["lli", ll_file],
+                input=stdin_data,
                 capture_output=True,
                 text=True
             )
