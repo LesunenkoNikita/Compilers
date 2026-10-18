@@ -8,6 +8,7 @@ I8 = ir.IntType(8)
 I1 = ir.IntType(1)
 
 BUILTIN = ("i32", "i64", "bool")
+RESERVED = ("read", "print")
 
 
 class CompileError(Exception):
@@ -104,6 +105,17 @@ def lex(data: bytes):
                 tokens.append(Token(SINGLE[b], chr(b), line, col))
                 i += 1
                 col += 1
+                continue
+
+            if b == ord('"'):
+                j = i + 1
+                while j < len(data) and data[j] not in (ord('"'), 10):
+                    j += 1
+                if j >= len(data) or data[j] == 10:
+                    raise CompileError(f"line {line}:{col}: string literal is not closed on its line")
+                tokens.append(Token("string", data[i + 1:j].decode("latin-1"), line, col))
+                col += j + 1 - i
+                i = j + 1
                 continue
 
             if b == ord(":"):
@@ -219,6 +231,26 @@ def entry_alloca(builder, ty, name):
     return slot
 
 
+def cstr(builder, ctx, text):
+    cache = ctx["strings"]
+    if text not in cache:
+        data = text.encode("latin-1") + b"\0"
+        g = ir.GlobalVariable(ctx["module"], ir.ArrayType(I8, len(data)), name=f"str.{len(cache)}")
+        g.linkage = "private"
+        g.global_constant = True
+        g.initializer = ir.Constant(ir.ArrayType(I8, len(data)), bytearray(data))
+        cache[text] = g
+    return builder.bitcast(cache[text], ir.PointerType(I8))
+
+
+def emit_printf(builder, ctx, fmt, *args):
+    builder.call(ctx["printf"], [cstr(builder, ctx, fmt), *args])
+
+
+def bool_str(builder, ctx, val):
+    return builder.select(val, cstr(builder, ctx, "true"), cstr(builder, ctx, "false"))
+
+
 def is_addressable(expr):
     return isinstance(expr, (VarNode, FieldNode))
 
@@ -230,6 +262,26 @@ def address_of(expr, builder, ctx):
     slot = entry_alloca(builder, val.type, "tmp")
     builder.store(val, slot)
     return slot
+
+
+SCALAR_FMT = {"i32": "%d", "i64": "%lld", "bool": "%s"}
+
+
+def print_struct(builder, ctx, ptr, type_name, last):
+    sdef = ctx["struct_defs"][type_name]
+    emit_printf(builder, ctx, f"{type_name}{{")
+    for i, f in enumerate(sdef.fields):
+        sep = "" if i == 0 else ", "
+        fptr = field_ptr(builder, ptr, [i])
+        if f.type_name in BUILTIN:
+            val = builder.load(fptr, name=f"{f.name}_val")
+            if f.type_name == "bool":
+                val = bool_str(builder, ctx, val)
+            emit_printf(builder, ctx, f"{sep}{f.name}: {SCALAR_FMT[f.type_name]}", val)
+        else:
+            emit_printf(builder, ctx, f"{sep}{f.name}: ")
+            print_struct(builder, ctx, fptr, f.type_name, False)
+    emit_printf(builder, ctx, "}\n" if last else "}")
 
 
 class Node:
@@ -354,6 +406,32 @@ class MemberCallNode(ExprNode):
         for arg, (p_type, _) in zip(self.args, self.fn.params):
             vals.append(coerce(builder, arg.codegen(builder, ctx), arg.type, p_type))
         return builder.call(self.fn.ir_func, vals, name=f"{self.name}_res")
+
+
+class ReadNode(ExprNode):
+    def dump(self, indent=0):
+        print(" " * indent + "Read")
+
+    def accept(self, visitor):
+        return visitor.visit_read(self)
+
+    def codegen(self, builder, ctx):
+        slot = entry_alloca(builder, I32, "read_slot")
+        builder.store(ir.Constant(I32, 0), slot)
+        builder.call(ctx["scanf"], [cstr(builder, ctx, "%d"), slot])
+        return builder.load(slot, name="read_val")
+
+
+class StringNode(ExprNode):
+    def __init__(self, line, col, text):
+        super().__init__(line, col)
+        self.text = text
+
+    def dump(self, indent=0):
+        print(" " * indent + f'String "{self.text}"')
+
+    def accept(self, visitor):
+        self.type = "string"
 
 
 class BinOpNode(ExprNode):
@@ -525,6 +603,31 @@ class ExitNode(StmtNode):
             builder.call(ctx["printf"], [fmt_ptr, s_ptr])
 
         builder.ret(ir.Constant(I32, 0))
+
+
+class PrintNode(StmtNode):
+    def __init__(self, line, col, value):
+        super().__init__(line, col)
+        self.value = value
+
+    def dump(self, indent=0):
+        print(" " * indent + "Print")
+        self.value.dump(indent + 2)
+
+    def accept(self, visitor):
+        return visitor.visit_print(self)
+
+    def codegen(self, builder, ctx):
+        t = self.value.type
+        if t == "string":
+            emit_printf(builder, ctx, "%s\n", cstr(builder, ctx, self.value.text))
+        elif t in BUILTIN:
+            val = self.value.codegen(builder, ctx)
+            if t == "bool":
+                val = bool_str(builder, ctx, val)
+            emit_printf(builder, ctx, SCALAR_FMT[t] + "\n", val)
+        else:
+            print_struct(builder, ctx, address_of(self.value, builder, ctx), t, True)
 
 
 class BlockNode(Node):
@@ -909,15 +1012,21 @@ class Parser:
                 self.eat()
                 mutable = True
             fname = self.expect("identifier", "a field name")
+            self.check_name(fname, "a field")
             self.check_eol()
             self.next_line()
             fields.append(FieldDeclNode(fname.line, fname.col, type_tok, mutable, fname.text))
 
         raise CompileError(f"line {lbrace.line}:{lbrace.col}: '{{' is never closed")
 
+    def check_name(self, tok, what):
+        if tok.text in RESERVED:
+            raise CompileError(f"line {tok.line}:{tok.col}: '{tok.text}' is a reserved name and cannot be used as {what} name")
+
     def parse_fn(self, owner=None):
         start = self.eat()
         name = self.expect("identifier", "a function name")
+        self.check_name(name, "a member function" if owner else "a function")
         self.expect_text(":=", f"':=' after 'fn {name.text}'")
         self.expect_text("(", "'(' before the parameters")
 
@@ -928,6 +1037,7 @@ class Parser:
             while True:
                 p_type = self.parse_type()
                 p_name = self.expect("identifier", "a parameter name")
+                self.check_name(p_name, "a parameter")
                 params.append((p_type, p_name))
                 tok = self.peek()
                 if tok and tok.kind == "comma":
@@ -959,9 +1069,39 @@ class Parser:
                 return line[i - 1]
         return None
 
+    def parse_print(self):
+        start = self.eat()
+        self.expect_text("(", "'(' after 'print'")
+        args = []
+        if self.peek() and self.peek().kind == "rparen":
+            self.eat()
+        else:
+            while True:
+                tok = self.peek()
+                after = self.peek(1)
+                if tok and tok.kind == "string" and after and after.kind in ("comma", "rparen"):
+                    self.eat()
+                    args.append(StringNode(tok.line, tok.col, tok.text))
+                else:
+                    args.append(self.parse_expr())
+                tok = self.peek()
+                if tok and tok.kind == "comma":
+                    self.eat()
+                    continue
+                self.expect_text(")", "',' or ')' in 'print'")
+                break
+        if len(args) != 1:
+            raise CompileError(f"line {start.line}:{start.col}: 'print' needs 1 argument, got {len(args)}")
+        return PrintNode(start.line, start.col, args[0])
+
     def parse_statement(self):
         tok = self.peek()
         nxt = self.peek(1)
+        if tok.text == "print":
+            res = self.parse_print()
+            self.check_eol()
+            self.next_line()
+            return res
         if tok.kind == "identifier" and not (nxt and (nxt.kind == "identifier" or nxt.text == "mut")):
             call_tok = self.find_call_in_statement()
             if call_tok is not None:
@@ -1119,6 +1259,7 @@ class Parser:
             mutable = True
 
         name = self.expect("identifier", "a variable name")
+        self.check_name(name, "a variable")
 
         tok = self.peek()
         if not tok or tok.kind != "lbrace":
@@ -1158,6 +1299,7 @@ class Parser:
 
     def parse_assign(self):
         name = self.expect("identifier", "a variable name")
+        self.check_name(name, "a variable")
         names = self.parse_chain_rest(name)
         last = names[-1]
         tok = self.peek()
@@ -1229,6 +1371,7 @@ class Parser:
             raise CompileError(f"line {tok.line}:{tok.col}: expected ',' or ')', got '{tok.text}'")
 
     def parse_member_call(self, obj, name):
+        self.check_name(name, "a member function")
         return MemberCallNode(name.line, name.col, obj, name.text, self.parse_args())
 
     def parse_chain(self, first):
@@ -1262,6 +1405,18 @@ class Parser:
 
         if tok.kind == "constant":
             return ConstNode(tok.line, tok.col, int(tok.text))
+        elif tok.kind == "string":
+            raise CompileError(f"line {tok.line}:{tok.col}: a string literal can only be the argument of 'print'")
+        elif tok.text == "print":
+            raise CompileError(f"line {tok.line}:{tok.col}: 'print' has no value, it can only be a statement")
+        elif tok.text == "read":
+            nxt = self.peek()
+            if not nxt or nxt.kind != "lparen":
+                raise CompileError(f"line {tok.line}:{tok.col}: 'read' is a reserved name, it can only be called as read()")
+            args = self.parse_args()
+            if args:
+                raise CompileError(f"line {tok.line}:{tok.col}: 'read' needs 0 arguments, got {len(args)}")
+            return ReadNode(tok.line, tok.col)
         elif tok.kind == "identifier":
             node = self.parse_chain(tok)
             nxt = self.peek()
@@ -1619,6 +1774,12 @@ class SemanticChecker:
         node.fn = fn
         self.register_call(node, obj)
 
+    def visit_read(self, node):
+        node.type = "i32"
+
+    def visit_print(self, node):
+        node.value.accept(self)
+
     def visit_binop(self, node):
         node.left.accept(self)
         node.right.accept(self)
@@ -1699,7 +1860,7 @@ def main():
         input_path = args[0]
         output_path = args[1]
 
-    module = ir.Module(name="practice7_task2")
+    module = ir.Module(name="practice7_task3")
     module.triple = llvm.get_default_triple()
 
     main_func_type = ir.FunctionType(I32, [])
@@ -1708,14 +1869,18 @@ def main():
 
     printf_type = ir.FunctionType(I32, [ir.PointerType(I8)], var_arg=True)
     printf = ir.Function(module, printf_type, name="printf")
+    scanf = ir.Function(module, printf_type, name="scanf")
 
     ctx = {
+        "module": module,
         "printf": printf,
+        "scanf": scanf,
         "fmt_int": build_global_str(module, "fmt_int", "Program exit with result %lld\n"),
         "fmt_str": build_global_str(module, "fmt_str", "Program exit with result %s\n"),
         "str_true": build_global_str(module, "str_true", "true"),
         "str_false": build_global_str(module, "str_false", "false")
     }
+    ctx["strings"] = {"true": ctx["str_true"], "false": ctx["str_false"]}
 
     try:
         with open(input_path, "rb") as source:
