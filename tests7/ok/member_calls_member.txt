@@ -1,0 +1,20 @@
+struct Counter
+{
+    i32 mut n
+
+    fn inc := () -> i32
+    {
+        n := n + 1
+        exit n
+    }
+
+    fn incTwice := () -> i32
+    {
+        i32 first{inc()}
+        exit inc()
+    }
+}
+Counter mut c{5}
+i32 r{c.incTwice()}
+i32 result{r + c.n}
+exit result

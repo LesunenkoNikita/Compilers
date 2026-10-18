@@ -1,0 +1,23 @@
+Program
+  Struct Point
+    Member x i32 mut
+    Member y i32 mut
+  Struct Circle
+    Member center Point const
+    Member radius i32 mut
+  Decl p Point const
+    Const 10
+    Const 20
+  Decl c Circle mut
+    Var p
+    Const 10
+  Assign c.radius
+    Const 5
+  Decl q Point mut
+    Var p
+  Assign q.x
+    BinOp +
+      Field q.x
+      Field c.radius
+  Exit
+    Field q.x

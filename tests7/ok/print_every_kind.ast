@@ -1,0 +1,58 @@
+Program
+  Struct Flags
+    Member on bool const
+    Member big i64 const
+  Struct Box
+    Member f Flags const
+    Member id i32 const
+  Fn mk -> Box
+    Block
+      Decl fl Flags const
+        Bool false
+        Const 9000000000
+      Decl b Box const
+        Var fl
+        Const 7
+      Exit
+        Var b
+  Decl neg i32 const
+    BinOp -
+      Const 0
+      Const 9
+  Decl big i64 const
+    Const 6000000000
+  Decl t bool const
+    BinOp ==
+      Var neg
+      BinOp -
+        Const 0
+        Const 9
+  Decl fl Flags const
+    Bool true
+    Var big
+  Decl b Box const
+    Var fl
+    Const 1
+  Print
+    Var neg
+  Print
+    Var big
+  Print
+    Var t
+  Print
+    String "100% text \n as written"
+  Print
+    Var fl
+  Print
+    Var b
+  Print
+    Field b.f
+  Print
+    Call mk
+  If
+    Var t
+    Block
+      Print
+        String "inside if"
+  Exit
+    Const 0

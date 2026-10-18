@@ -1,0 +1,15 @@
+Program
+  Fn big -> i64
+    Param n i64
+    Block
+      Decl r i64 const
+        BinOp +
+          Var n
+          Const 5000000000
+      Exit
+        Var r
+  Decl small i32 const
+    Const 7
+  Exit
+    Call big
+      Var small

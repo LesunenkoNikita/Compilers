@@ -1,0 +1,31 @@
+Program
+  Struct Point
+    Member x i32 mut
+    Member y i32 mut
+  Struct Circle
+    Member center Point const
+    Member radius i32 mut
+  Struct Ring
+    Member outer Circle const
+    Member inner Circle const
+  Decl a Point const
+    Const 1
+    Const 2
+  Decl b Point const
+    Const 3
+    Const 4
+  Decl c1 Circle const
+    Var a
+    Const 5
+  Decl c2 Circle const
+    Var b
+    Const 6
+  Decl r Ring const
+    Var c1
+    Var c2
+  Decl result i32 const
+    BinOp +
+      Field r.outer.center.y
+      Field r.inner.center.x
+  Exit
+    Var result

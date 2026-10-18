@@ -1,0 +1,13 @@
+struct Rect
+{
+    i32 w
+    i32 h
+
+    fn scaled := (i32 kw, i32 kh) -> i32
+    {
+        i32 a{w * kw * h * kh}
+        exit a
+    }
+}
+Rect r{2, 3}
+exit r.scaled(4, 5)
