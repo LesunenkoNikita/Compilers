@@ -1,0 +1,38 @@
+Program
+  Struct Point
+    Member x i32 mut
+    Member y i32 mut
+    MemberFn d2 -> i32
+      Block
+        Decl r i32 const
+          BinOp +
+            BinOp *
+              Var x
+              Var x
+            BinOp *
+              Var y
+              Var y
+        Exit
+          Var r
+    MemberFn shift -> i32
+      Param dx i32
+      Block
+        Assign x
+          BinOp +
+            Var x
+            Var dx
+        Exit
+          Var x
+  Decl p Point mut
+    Const 3
+    Const 4
+  Decl moved i32 const
+    MemberCall shift
+      Var p
+      Const 10
+  Decl result i32 const
+    BinOp +
+      Var moved
+      Field p.x
+  Exit
+    Var result

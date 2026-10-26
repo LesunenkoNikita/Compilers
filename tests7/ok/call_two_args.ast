@@ -1,0 +1,26 @@
+Program
+  Struct Rect
+    Member w i32 const
+    Member h i32 const
+    MemberFn scaled -> i32
+      Param kw i32
+      Param kh i32
+      Block
+        Decl a i32 const
+          BinOp *
+            BinOp *
+              BinOp *
+                Var w
+                Var kw
+              Var h
+            Var kh
+        Exit
+          Var a
+  Decl r Rect const
+    Const 2
+    Const 3
+  Exit
+    MemberCall scaled
+      Var r
+      Const 4
+      Const 5
