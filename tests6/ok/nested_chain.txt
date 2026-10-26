@@ -1,0 +1,22 @@
+struct Point
+{
+    i32 mut x
+    i32 mut y
+}
+struct Circle
+{
+    Point center
+    i32 mut radius
+}
+struct Ring
+{
+    Circle outer
+    Circle inner
+}
+Point a{1, 2}
+Point b{3, 4}
+Circle c1{a, 5}
+Circle c2{b, 6}
+Ring r{c1, c2}
+i32 result{r.outer.center.y + r.inner.center.x}
+exit result

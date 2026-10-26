@@ -1,0 +1,6 @@
+fn big := (i32 n) -> i64
+{
+    exit n
+}
+i32 x{big(1)}
+exit x

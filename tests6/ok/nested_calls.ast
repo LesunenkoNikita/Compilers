@@ -1,0 +1,26 @@
+Program
+  Fn add -> i32
+    Param a i32
+    Param b i32
+    Block
+      Decl sum i32 const
+        BinOp +
+          Var a
+          Var b
+      Exit
+        Var sum
+  Fn twice -> i32
+    Param a i32
+    Block
+      Exit
+        Call add
+          Var a
+          Var a
+  Exit
+    Call add
+      Call twice
+        Const 3
+      Call add
+        Const 4
+        Call twice
+          Const 5
