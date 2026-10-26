@@ -53,7 +53,9 @@ SINGLE = {
     ord(","): "comma",
     ord("."): "dot",
     ord("("): "lparen",
-    ord(")"): "rparen"
+    ord(")"): "rparen",
+    ord("["): "lbracket",
+    ord("]"): "rbracket"
 }
 
 
@@ -753,6 +755,37 @@ class WhileNode(StmtNode):
         builder.position_at_end(end_bb)
 
 
+class LambdaNode(StmtNode):
+    def __init__(self, line, col, name_tok, captures, params, ret_tok, body):
+        super().__init__(line, col)
+        self.name_tok = name_tok
+        self.name = name_tok.text
+        self.captures = captures
+        self.param_toks = params
+        self.ret_tok = ret_tok
+        self.body = body
+        self.struct_def = None
+        self.decl = None
+
+    def dump(self, indent=0):
+        print(" " * indent + f"Lambda {self.name} -> {self.ret_tok.text}")
+        if self.struct_def is not None:
+            self.struct_def.dump(indent + 2)
+            self.decl.dump(indent + 2)
+            return
+        for tok, mutable in self.captures:
+            print(" " * (indent + 2) + f"Capture {tok.text}")
+        for p_type, p_name in self.param_toks:
+            print(" " * (indent + 2) + f"Param {p_name.text} {p_type.text}")
+        self.body.dump(indent + 2)
+
+    def accept(self, visitor):
+        return visitor.visit_lambda(self)
+
+    def codegen(self, builder, ctx):
+        self.decl.codegen(builder, ctx)
+
+
 class FieldDeclNode(Node):
     def __init__(self, line, col, type_tok, mutable, name):
         super().__init__(line, col)
@@ -862,6 +895,7 @@ class ProgramNode(Node):
         self.fns = fns
         self.stmts = stmts
         self.exit_node = exit_node
+        self.lambda_structs = []
 
     def dump(self, indent=0):
         print(" " * indent + "Program")
@@ -880,7 +914,7 @@ class ProgramNode(Node):
         module = builder.module
         ctx["struct_types"] = {}
         ctx["struct_defs"] = {}
-        all_structs = self.structs
+        all_structs = self.structs + self.lambda_structs
         for s in all_structs:
             stype = module.context.get_identified_type(s.name)
             stype.set_body(*[llvm_type(f.type_name, ctx) for f in s.fields])
@@ -985,6 +1019,9 @@ class Parser:
                 if phase > 0:
                     raise CompileError(f"line {first.line}:{first.col}: 'struct' after a function or a statement")
                 structs.append(self.parse_struct())
+            elif first.text == "fn" and self.is_lambda_start():
+                phase = 2
+                stmts.append(self.parse_lambda())
             elif first.text == "fn":
                 if phase > 1:
                     raise CompileError(f"line {first.line}:{first.col}: 'fn' after a statement")
@@ -1049,6 +1086,10 @@ class Parser:
         if tok.text in RESERVED:
             raise CompileError(f"line {tok.line}:{tok.col}: '{tok.text}' is a reserved name and cannot be used as {what} name")
 
+    def is_lambda_start(self):
+        t1, t2, t3 = self.peek(1), self.peek(2), self.peek(3)
+        return bool(t1 and t1.kind == "identifier" and t2 and t2.text == ":=" and t3 and t3.kind == "lbracket")
+
     def parse_params(self):
         self.expect_text("(", "'(' before the parameters")
         params = []
@@ -1080,11 +1121,38 @@ class Parser:
             raise CompileError(f"line {body.end.line}:{body.end.col}: function '{name.text}' must end with 'exit'")
         return params, ret_tok, body
 
+    def parse_captures(self):
+        self.eat()
+        captures = []
+        if self.peek() and self.peek().kind == "rbracket":
+            self.eat()
+            return captures
+        while True:
+            captures.append((self.expect("identifier", "a captured name"), False))
+            tok = self.peek()
+            if tok and tok.kind == "comma":
+                self.eat()
+                continue
+            self.expect_text("]", "',' or ']' in the capture list")
+            return captures
+
+    def parse_lambda(self):
+        start = self.eat()
+        name = self.expect("identifier", "a lambda name")
+        self.check_name(name, "a lambda")
+        self.eat()
+        captures = self.parse_captures()
+        params, ret_tok, body = self.parse_signature_and_body(name)
+        return LambdaNode(start.line, start.col, name, captures, params, ret_tok, body)
+
     def parse_fn(self, owner=None):
         start = self.eat()
         name = self.expect("identifier", "a function name")
         self.check_name(name, "a member function" if owner else "a function")
         self.expect_text(":=", f"':=' after 'fn {name.text}'")
+        tok = self.peek()
+        if owner and tok and tok.kind == "lbracket":
+            raise CompileError(f"line {tok.line}:{tok.col}: member function '{name.text}' cannot have a capture list")
         params, ret_tok, body = self.parse_signature_and_body(name)
         if owner:
             return MemberFnNode(start.line, start.col, name, params, ret_tok, body, owner)
@@ -1153,6 +1221,8 @@ class Parser:
             raise CompileError(f"line {tok.line}:{tok.col}: 'else' without an 'if'")
         elif tok.text == "struct":
             raise CompileError(f"line {tok.line}:{tok.col}: cannot declare a struct inside a block")
+        elif tok.text == "fn" and self.is_lambda_start():
+            return self.parse_lambda()
         elif tok.text == "fn":
             raise CompileError(f"line {tok.line}:{tok.col}: cannot declare a function inside a block")
         elif tok.kind == "identifier":
@@ -1487,6 +1557,10 @@ class SemanticChecker:
         self.pending = []
         self.mut_final = False
         self.all_methods = []
+        self.lambda_structs = []
+        self.lambda_names = {}
+        self.lambda_stack = []
+        self.allow_lambda = False
 
     def context(self):
         return (self.scopes, self.current_fn, self.current_struct, self.current_this)
@@ -1502,14 +1576,29 @@ class SemanticChecker:
             return this, [idx], [(tok, struct.fields[idx])]
         return None
 
+    def in_lambda(self):
+        return bool(self.lambda_stack) and self.current_struct is self.lambda_stack[-1][2]
+
+    def not_captured(self, node, name):
+        if self.in_lambda():
+            lname, outer, _ = self.lambda_stack[-1]
+            if self.resolve_in(outer, name, node) is not None:
+                raise CompileError(f"line {node.line}:{node.col}: '{name}' is not captured by lambda '{lname}': add it to the capture list, [{name}]")
+
     def lookup_root(self, node, name):
         found = self.resolve_in(self.context(), name, node)
         if found is not None:
             return found
+        self.not_captured(node, name)
         s = self.current_struct
+        if self.in_lambda():
+            raise CompileError(f"line {node.line}:{node.col}: name '{name}' is not a parameter, a local variable or a capture of lambda '{self.lambda_stack[-1][0]}'")
         if s is not None:
             raise CompileError(f"line {node.line}:{node.col}: name '{name}' is not a parameter, a local variable or a field of '{s.name}'")
         raise CompileError(f"line {node.line}:{node.col}: variable '{name}' is used before its declaration")
+
+    def is_lambda_type(self, type_name):
+        return type_name in self.lambda_names
 
     def expr_label(self, expr):
         if isinstance(expr, VarNode):
@@ -1517,6 +1606,10 @@ class SemanticChecker:
         if isinstance(expr, FieldNode):
             return ".".join(t.text for t in expr.names)
         return getattr(expr, "name", "value")
+
+    def reject_lambda(self, expr, what):
+        if not self.allow_lambda and self.is_lambda_type(getattr(expr, "type", None)):
+            raise CompileError(f"line {expr.line}:{expr.col}: '{self.expr_label(expr)}' is a lambda and {what}")
 
     def resolve_path(self, node, names):
         decl, indices, links = self.lookup_root(node, names[0].text)
@@ -1528,6 +1621,8 @@ class SemanticChecker:
         return decl, curr_type, indices, links
 
     def step_field(self, curr_type, prev_text, tok, indices, links):
+        if self.is_lambda_type(curr_type):
+            raise CompileError(f"line {tok.line}:{tok.col}: the captures of lambda '{self.lambda_names[curr_type]}' are not visible outside its body")
         if curr_type not in self.structs:
             raise CompileError(f"line {tok.line}:{tok.col}: cannot access field '{tok.text}': '{prev_text}' is not a struct, got {curr_type}")
         sdef = self.structs[curr_type]
@@ -1605,6 +1700,7 @@ class SemanticChecker:
         for s in node.stmts:
             s.accept(self)
         node.exit_node.accept(self)
+        node.lambda_structs = self.lambda_structs
 
     def check_mutating_call(self, call, chain, bad):
         if call.fn.mutating and bad is not None and getattr(call, "label", None):
@@ -1638,6 +1734,7 @@ class SemanticChecker:
             raise CompileError(f"line {node.line}:{node.col}: {what} needs {plural(len(fn.params), 'argument')}, got {len(node.args)}")
         for arg, (p_type, p_name) in zip(node.args, fn.params):
             arg.accept(self)
+            self.reject_lambda(arg, f"cannot be passed to '{callee}': its type has no name, so no parameter can have it")
             self.check_assignable(arg, p_type, arg, f"initialise parameter '{p_name}'")
 
     def visit_struct_def(self, node):
@@ -1689,6 +1786,62 @@ class SemanticChecker:
         node.body.exit_node.accept(self)
         self.scopes, self.current_fn, self.current_struct, self.current_this = saved
 
+    def visit_lambda(self, node):
+        outer = self.context()
+        seen = []
+        fields = []
+        inits = []
+        for tok, mutable in node.captures:
+            if tok.text in seen:
+                raise CompileError(f"line {tok.line}:{tok.col}: '{tok.text}' is captured twice")
+            seen.append(tok.text)
+            found = self.resolve_in(outer, tok.text, tok)
+            if found is None:
+                raise CompileError(f"line {tok.line}:{tok.col}: cannot capture '{tok.text}': no variable '{tok.text}' is visible here")
+            decl, _, links = found
+            c_type = links[-1][1].type_name if links else decl.type_name
+            fields.append(FieldDeclNode(tok.line, tok.col, Token("identifier", c_type, tok.line, tok.col), mutable, tok.text))
+            inits.append(VarNode(tok.line, tok.col, tok.text))
+
+        for p_type, p_name in node.param_toks:
+            self.check_type(p_type)
+            if p_name.text in seen:
+                raise CompileError(f"line {p_name.line}:{p_name.col}: parameter '{p_name.text}' has the same name as a capture of lambda '{node.name}'")
+        self.check_type(node.ret_tok)
+
+        s_name = f"lambda.{node.name}"
+        n = 1
+        while s_name in self.structs:
+            n += 1
+            s_name = f"lambda.{node.name}.{n}"
+
+        call_tok = Token("identifier", "call", node.name_tok.line, node.name_tok.col)
+        method = MemberFnNode(node.line, node.col, call_tok, node.param_toks, node.ret_tok, node.body, s_name)
+        method.label = node.name
+        sdef = StructDefNode(node.line, node.col, s_name, fields, [method])
+        for i, f in enumerate(fields):
+            sdef.index[f.name] = i
+        sdef.method_index["call"] = method
+        self.structs[s_name] = sdef
+        self.lambda_names[s_name] = node.name
+        self.lambda_structs.append(sdef)
+        self.all_methods.append(method)
+
+        self.lambda_stack.append((node.name, outer, sdef))
+        self.check_body(method, sdef)
+        self.lambda_stack.pop()
+        if self.mut_final and any(c.mutating for c in method.calls_on_this):
+            method.mutating = True
+
+        lbrace = Token("lbrace", "{", node.name_tok.line, node.name_tok.col)
+        type_tok = Token("identifier", s_name, node.name_tok.line, node.name_tok.col)
+        decl = DeclNode(node.name_tok.line, node.name_tok.col, node.name, type_tok, False, inits, lbrace)
+        self.allow_lambda = True
+        self.visit_decl(decl)
+        self.allow_lambda = False
+        node.struct_def = sdef
+        node.decl = decl
+
     def visit_block(self, node):
         self.scopes.append({})
         for s in node.statements:
@@ -1720,6 +1873,7 @@ class SemanticChecker:
 
         if len(items) == 1 and not isinstance(first, InitListNode):
             first.accept(self)
+            self.reject_lambda(first, "cannot initialise a variable or a field: its type has no name")
             checked = True
             if first.type == type_name:
                 first.target_type = type_name
@@ -1738,6 +1892,7 @@ class SemanticChecker:
             else:
                 if not (i == 0 and checked):
                     item.accept(self)
+                    self.reject_lambda(item, "cannot initialise a variable or a field: its type has no name")
                 self.check_assignable(item, field.type_name, item, f"initialise field '{field.name}'")
                 item.target_type = field.type_name
         return False
@@ -1753,6 +1908,7 @@ class SemanticChecker:
             if len(node.inits) != 1:
                 raise CompileError(f"line {node.lbrace.line}:{node.lbrace.col}: variable '{node.name}' needs 1 value in {{}}, got {len(node.inits)}")
             node.inits[0].accept(self)
+            self.reject_lambda(node.inits[0], "cannot initialise a variable or a field: its type has no name")
             self.check_assignable(node.inits[0], node.type_name, node, f"initialise '{node.name}'")
         else:
             node.copy = self.check_init(node.inits, node.type_name, node.lbrace)
@@ -1761,7 +1917,10 @@ class SemanticChecker:
 
     def visit_assign(self, node):
         root = node.names[0]
-        decl, _, _ = self.lookup_root(node, root.text)
+        decl, _, root_links = self.lookup_root(node, root.text)
+        root_type = root_links[-1][1].type_name if root_links else decl.type_name
+        if len(node.names) == 1 and self.is_lambda_type(root_type):
+            raise CompileError(f"line {node.line}:{node.col}: cannot assign to '{node.name}': it is a lambda")
 
         if not decl.mutable:
             if len(node.names) == 1:
@@ -1769,6 +1928,8 @@ class SemanticChecker:
             raise CompileError(f"line {root.line}:{root.col}: cannot assign to '{node.name}': '{root.text}' is not mut")
         decl, node.target_type, node.indices, links = self.resolve_path(node, node.names)
         for tok, field in links:
+            if not field.mutable and decl is self.current_this and self.in_lambda():
+                raise CompileError(f"line {node.line}:{node.col}: cannot assign to '{node.name}': the capture '{tok.text}' is const, write [mut {tok.text}]")
             if not field.mutable:
                 raise CompileError(f"line {tok.line}:{tok.col}: cannot assign to '{node.name}': field '{tok.text}' is not mut")
         if decl is self.current_this and self.current_this is not None:
@@ -1780,11 +1941,13 @@ class SemanticChecker:
                 raise CompileError(f"line {node.line}:{node.col}: cannot assign to '{node.name}': field '{bad[1]}' of '{bad[0]}' is not mut")
 
         node.value.accept(self)
+        self.reject_lambda(node.value, "cannot be assigned: its type has no name")
         self.check_assignable(node.value, node.target_type, node, f"assign to '{node.name}'")
         node.decl = decl
 
     def visit_exit(self, node):
         node.value.accept(self)
+        self.reject_lambda(node.value, "cannot be the value of 'exit'")
         have = node.value.type
 
         if self.current_fn is None:
@@ -1802,7 +1965,7 @@ class SemanticChecker:
 
     def visit_call(self, node):
         s = self.current_struct
-        own_method = s is not None and node.name in s.method_index
+        own_method = s is not None and not self.in_lambda() and node.name in s.method_index
         is_function = own_method or node.name in self.functions
         if self.resolve_in(self.context(), node.name, node) is not None:
             if is_function:
@@ -1820,6 +1983,9 @@ class SemanticChecker:
             return
 
         if node.name not in self.functions:
+            if any(name == node.name for name, _, _ in self.lambda_stack):
+                raise CompileError(f"line {node.line}:{node.col}: lambda '{node.name}' cannot call itself")
+            self.not_captured(node, node.name)
             raise CompileError(f"line {node.line}:{node.col}: function '{node.name}' is used before its declaration")
 
         fn = self.functions[node.name]
@@ -1857,7 +2023,7 @@ class SemanticChecker:
         if t not in self.structs:
             raise CompileError(f"line {node.line}:{node.col}: cannot call '{node.name}' on a value of type {t}")
         sdef = self.structs[t]
-        if node.name not in sdef.method_index and node.name in sdef.index:
+        if node.name not in sdef.method_index and node.name in sdef.index and not self.is_lambda_type(t):
             tok = Token("identifier", node.name, node.line, node.col)
             if isinstance(obj, VarNode):
                 field = FieldNode(obj.line, obj.col, [Token("identifier", obj.name, obj.line, obj.col), tok])
@@ -1898,6 +2064,7 @@ class SemanticChecker:
 
     def visit_print(self, node):
         node.value.accept(self)
+        self.reject_lambda(node.value, "cannot be printed")
 
     def visit_binop(self, node):
         node.left.accept(self)
@@ -1961,14 +2128,18 @@ def build_global_str(module, name, text):
 def main():
     args = sys.argv[1:]
     print_ast = False
+    print_checked = False
 
     if "--ast" in args:
         print_ast = True
         args.remove("--ast")
+    if "--ast-checked" in args:
+        print_checked = True
+        args.remove("--ast-checked")
 
-    if print_ast:
+    if print_ast or print_checked:
         if len(args) != 1:
-            print(f"usage: {sys.argv[0]} [--ast] input.txt", file=sys.stderr)
+            print(f"usage: {sys.argv[0]} [--ast | --ast-checked] input.txt", file=sys.stderr)
             sys.exit(1)
         input_path = args[0]
         output_path = None
@@ -1979,7 +2150,7 @@ def main():
         input_path = args[0]
         output_path = args[1]
 
-    module = ir.Module(name="practice8_task1")
+    module = ir.Module(name="practice8_task2")
     module.triple = llvm.get_default_triple()
 
     main_func_type = ir.FunctionType(I32, [])
@@ -2014,6 +2185,10 @@ def main():
 
         checker = SemanticChecker()
         tree.accept(checker)
+
+        if print_checked:
+            tree.dump()
+            sys.exit(0)
 
         tree.codegen(builder, ctx)
 
