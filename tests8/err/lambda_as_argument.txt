@@ -1,0 +1,11 @@
+fn sq := (i32 v) -> i32
+{
+    i32 r{v * v}
+    exit r
+}
+fn times := [](i32 v) -> i32
+{
+    exit sq(v)
+}
+i32 a{sq(times)}
+exit a

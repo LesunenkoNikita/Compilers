@@ -1,0 +1,13 @@
+i32 n{0}
+fn step := [mut n](i32 d) -> i32
+{
+    n := n + d
+    exit n
+}
+i32 mut i{0}
+while i != 4
+{
+    print(step(i))
+    i := i + 1
+}
+exit n

@@ -1,0 +1,8 @@
+struct Point
+{
+    i32 x
+    i32 y
+}
+Point p{1, 2}
+i32 a{p(3)}
+exit a

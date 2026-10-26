@@ -1,0 +1,10 @@
+i32 mut base{read()}
+fn add_base := [base](i32 y) -> i32
+{
+    i32 r{base + y}
+    exit r
+}
+base := base * 100
+print(base)
+print(add_base(1))
+exit add_base(2)

@@ -774,7 +774,7 @@ class LambdaNode(StmtNode):
             self.decl.dump(indent + 2)
             return
         for tok, mutable in self.captures:
-            print(" " * (indent + 2) + f"Capture {tok.text}")
+            print(" " * (indent + 2) + f"Capture {'mut ' if mutable else ''}{tok.text}")
         for p_type, p_name in self.param_toks:
             print(" " * (indent + 2) + f"Param {p_name.text} {p_type.text}")
         self.body.dump(indent + 2)
@@ -1128,7 +1128,11 @@ class Parser:
             self.eat()
             return captures
         while True:
-            captures.append((self.expect("identifier", "a captured name"), False))
+            mutable = False
+            if self.peek() and self.peek().text == "mut":
+                self.eat()
+                mutable = True
+            captures.append((self.expect("identifier", "a captured name"), mutable))
             tok = self.peek()
             if tok and tok.kind == "comma":
                 self.eat()
@@ -1835,7 +1839,7 @@ class SemanticChecker:
 
         lbrace = Token("lbrace", "{", node.name_tok.line, node.name_tok.col)
         type_tok = Token("identifier", s_name, node.name_tok.line, node.name_tok.col)
-        decl = DeclNode(node.name_tok.line, node.name_tok.col, node.name, type_tok, False, inits, lbrace)
+        decl = DeclNode(node.name_tok.line, node.name_tok.col, node.name, type_tok, any(m for _, m in node.captures), inits, lbrace)
         self.allow_lambda = True
         self.visit_decl(decl)
         self.allow_lambda = False
@@ -2150,7 +2154,7 @@ def main():
         input_path = args[0]
         output_path = args[1]
 
-    module = ir.Module(name="practice8_task2")
+    module = ir.Module(name="practice8")
     module.triple = llvm.get_default_triple()
 
     main_func_type = ir.FunctionType(I32, [])
