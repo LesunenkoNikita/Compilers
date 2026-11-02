@@ -1733,13 +1733,18 @@ class SemanticChecker:
         else:
             self.pending.append((call, chain, bad))
 
-    def check_args(self, node, fn, what, callee):
+    def check_args(self, node, fn, what, callee, callable_object=False):
         if len(node.args) != len(fn.params):
             raise CompileError(f"line {node.line}:{node.col}: {what} needs {plural(len(fn.params), 'argument')}, got {len(node.args)}")
         for arg, (p_type, p_name) in zip(node.args, fn.params):
             arg.accept(self)
             self.reject_lambda(arg, f"cannot be passed to '{callee}': its type has no name, so no parameter can have it")
-            self.check_assignable(arg, p_type, arg, f"initialise parameter '{p_name}'")
+            if callable_object and isinstance(arg, ConstNode) and p_type == "i32" and arg.type == "i64":
+                raise CompileError(f"line {arg.line}:{arg.col}: constant {arg.value} does not fit in i32")
+            if callable_object and not (arg.type == p_type or (arg.type == "i32" and p_type == "i64")):
+                raise CompileError(f"line {arg.line}:{arg.col}: cannot call '{callee}': its parameter '{p_name}' is {p_type}, got a value of type {arg.type}")
+            if not callable_object:
+                self.check_assignable(arg, p_type, arg, f"initialise parameter '{p_name}'")
 
     def visit_struct_def(self, node):
         if node.name in self.structs:
@@ -1990,6 +1995,8 @@ class SemanticChecker:
             if any(name == node.name for name, _, _ in self.lambda_stack):
                 raise CompileError(f"line {node.line}:{node.col}: lambda '{node.name}' cannot call itself")
             self.not_captured(node, node.name)
+            if node.name in self.structs:
+                raise CompileError(f"line {node.line}:{node.col}: '{node.name}' is a type, not a function or an object: it cannot be called")
             raise CompileError(f"line {node.line}:{node.col}: function '{node.name}' is used before its declaration")
 
         fn = self.functions[node.name]
@@ -2010,7 +2017,7 @@ class SemanticChecker:
         node.name = "call"
         node.label = label
         fn = sdef.method_index["call"]
-        self.check_args(node, fn, f"'{label}'", label)
+        self.check_args(node, fn, f"'{label}'", label, True)
         node.type = fn.ret_type
         node.fn = fn
         self.register_call(node, obj)
@@ -2120,6 +2127,108 @@ class SemanticChecker:
         node.type = "bool"
 
 
+def children(node):
+    if isinstance(node, ProgramNode):
+        return [m for st in node.structs for m in st.methods] + node.fns + node.stmts + [node.exit_node]
+    if isinstance(node, FnDefNode):
+        return [node.body]
+    if isinstance(node, BlockNode):
+        return node.statements + ([node.exit_node] if node.exit_node else [])
+    if isinstance(node, LambdaNode):
+        return [node.decl, node.body]
+    if isinstance(node, DeclNode):
+        return list(node.inits)
+    if isinstance(node, InitListNode):
+        return list(node.items)
+    if isinstance(node, (AssignNode, ExitNode, PrintNode)):
+        return [node.value]
+    if isinstance(node, IfNode):
+        return [node.cond, node.then_block] + ([node.else_block] if node.else_block else [])
+    if isinstance(node, WhileNode):
+        return [node.cond, node.body_block]
+    if isinstance(node, BinOpNode):
+        return [node.left, node.right]
+    if isinstance(node, NotNode):
+        return [node.operand]
+    if isinstance(node, MemberCallNode):
+        return [node.obj] + node.args
+    if isinstance(node, CallNode):
+        return list(node.args)
+    if isinstance(node, ResultFieldNode):
+        return [node.obj]
+    return []
+
+
+def contains(node, test):
+    if test(node):
+        return True
+    return any(contains(c, test) for c in children(node))
+
+
+def has_call_or_read(expr):
+    return contains(expr, lambda n: isinstance(n, (CallNode, MemberCallNode, ReadNode)))
+
+
+class UseCounter:
+    def __init__(self, keeps_value):
+        self.keeps_value = keeps_value
+        self.reads = {}
+        self.decls = {}
+
+    def read(self, decl):
+        self.reads[id(decl)] = self.reads.get(id(decl), 0) + 1
+
+    def count(self, tree):
+        self.visit(tree)
+
+    def visit(self, node):
+        if isinstance(node, (BlockNode, ProgramNode)):
+            stmts = node.statements if isinstance(node, BlockNode) else node.stmts
+            for st in stmts:
+                if isinstance(st, DeclNode):
+                    self.decls[id(st)] = st
+                    self.reads.setdefault(id(st), 0)
+        if isinstance(node, DeclNode) and any(self.keeps_value(e) for e in node.inits):
+            self.read(node)
+        if isinstance(node, AssignNode) and self.keeps_value(node.value):
+            self.read(node.decl)
+        if isinstance(node, (VarNode, FieldNode)):
+            self.read(node.decl)
+        for c in children(node):
+            self.visit(c)
+
+
+class Pruner:
+    def __init__(self, dead_decls):
+        self.dead_decls = dead_decls
+
+    def keep(self, st):
+        if isinstance(st, DeclNode) and id(st) in self.dead_decls:
+            return False
+        if isinstance(st, AssignNode) and id(st.decl) in self.dead_decls:
+            return False
+        return True
+
+    def prune(self, node):
+        if isinstance(node, ProgramNode):
+            node.stmts = [st for st in node.stmts if self.keep(st)]
+        if isinstance(node, BlockNode):
+            node.statements = [st for st in node.statements if self.keep(st)]
+        for c in children(node):
+            self.prune(c)
+
+
+def remove_unused(tree):
+    while True:
+        counter = UseCounter(has_call_or_read)
+        counter.count(tree)
+        dead_decls = {d for d, k in counter.reads.items() if k == 0 and d in counter.decls}
+        if not dead_decls:
+            break
+        Pruner(dead_decls).prune(tree)
+    return tree
+
+
 def build_global_str(module, name, text):
     b = text.encode("ascii") + b"\0"
     g = ir.GlobalVariable(module, ir.ArrayType(I8, len(b)), name=name)
@@ -2133,7 +2242,11 @@ def main():
     args = sys.argv[1:]
     print_ast = False
     print_checked = False
+    optimize = False
 
+    if "--remove-unused" in args:
+        optimize = True
+        args.remove("--remove-unused")
     if "--ast" in args:
         print_ast = True
         args.remove("--ast")
@@ -2143,18 +2256,18 @@ def main():
 
     if print_ast or print_checked:
         if len(args) != 1:
-            print(f"usage: {sys.argv[0]} [--ast | --ast-checked] input.txt", file=sys.stderr)
+            print(f"usage: {sys.argv[0]} [--remove-unused] [--ast | --ast-checked] input.txt", file=sys.stderr)
             sys.exit(1)
         input_path = args[0]
         output_path = None
     else:
         if len(args) != 2:
-            print(f"usage: {sys.argv[0]} [--ast] input.txt output.ll", file=sys.stderr)
+            print(f"usage: {sys.argv[0]} [--remove-unused] input.txt output.ll", file=sys.stderr)
             sys.exit(1)
         input_path = args[0]
         output_path = args[1]
 
-    module = ir.Module(name="practice8")
+    module = ir.Module(name="practice9_task1")
     module.triple = llvm.get_default_triple()
 
     main_func_type = ir.FunctionType(I32, [])
@@ -2189,6 +2302,9 @@ def main():
 
         checker = SemanticChecker()
         tree.accept(checker)
+
+        if optimize:
+            remove_unused(tree)
 
         if print_checked:
             tree.dump()
