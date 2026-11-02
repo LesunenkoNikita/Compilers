@@ -2169,16 +2169,26 @@ def has_call_or_read(expr):
     return contains(expr, lambda n: isinstance(n, (CallNode, MemberCallNode, ReadNode)))
 
 
+def collect_lambda_structs(node, live):
+    if isinstance(node, LambdaNode):
+        live.add(id(node.struct_def))
+    for c in children(node):
+        collect_lambda_structs(c, live)
+
+
 class UseCounter:
     def __init__(self, keeps_value):
         self.keeps_value = keeps_value
         self.reads = {}
         self.decls = {}
+        self.calls = {}
 
     def read(self, decl):
         self.reads[id(decl)] = self.reads.get(id(decl), 0) + 1
 
     def count(self, tree):
+        for f in tree.fns:
+            self.calls.setdefault(id(f), 0)
         self.visit(tree)
 
     def visit(self, node):
@@ -2194,13 +2204,16 @@ class UseCounter:
             self.read(node.decl)
         if isinstance(node, (VarNode, FieldNode)):
             self.read(node.decl)
+        if isinstance(node, CallNode) and not isinstance(node.fn, MemberFnNode):
+            self.calls[id(node.fn)] = self.calls.get(id(node.fn), 0) + 1
         for c in children(node):
             self.visit(c)
 
 
 class Pruner:
-    def __init__(self, dead_decls):
+    def __init__(self, dead_decls, dead_fns):
         self.dead_decls = dead_decls
+        self.dead_fns = dead_fns
 
     def keep(self, st):
         if isinstance(st, DeclNode) and id(st) in self.dead_decls:
@@ -2211,6 +2224,7 @@ class Pruner:
 
     def prune(self, node):
         if isinstance(node, ProgramNode):
+            node.fns = [f for f in node.fns if id(f) not in self.dead_fns]
             node.stmts = [st for st in node.stmts if self.keep(st)]
         if isinstance(node, BlockNode):
             node.statements = [st for st in node.statements if self.keep(st)]
@@ -2223,9 +2237,14 @@ def remove_unused(tree):
         counter = UseCounter(has_call_or_read)
         counter.count(tree)
         dead_decls = {d for d, k in counter.reads.items() if k == 0 and d in counter.decls}
-        if not dead_decls:
+        dead_fns = {f for f, k in counter.calls.items() if k == 0}
+        if not dead_decls and not dead_fns:
             break
-        Pruner(dead_decls).prune(tree)
+        Pruner(dead_decls, dead_fns).prune(tree)
+
+    live = set()
+    collect_lambda_structs(tree, live)
+    tree.lambda_structs = [st for st in tree.lambda_structs if id(st) in live]
     return tree
 
 
@@ -2267,7 +2286,7 @@ def main():
         input_path = args[0]
         output_path = args[1]
 
-    module = ir.Module(name="practice9_task1")
+    module = ir.Module(name="practice9_task2")
     module.triple = llvm.get_default_triple()
 
     main_func_type = ir.FunctionType(I32, [])
