@@ -1,0 +1,19 @@
+struct Point
+{
+    i32 mut x
+    i32 y
+}
+fn add := (i32 a, i32 b) -> i32
+{
+    i32 s{a + b}
+    exit s
+}
+Point mut p{1, 2}
+p.x := add(p.x, p.y)
+i32 mut k{0}
+while k != p.x
+{
+    k := k + 1
+}
+print(p)
+exit k
