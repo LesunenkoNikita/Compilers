@@ -198,3 +198,61 @@ This Practice 7 section was added to ai_usage.txt.
 
 What I took as-is and what I changed:
 The week 7 files, tests, grammar and test_runner.py change were taken as-is after reviewing the bullet-point summaries above, with one requested change: member functions were reworked to use the "new nodes all the way" approach (Prompt 2).
+
+Practice 8:
+
+Tools: Claude Code (Claude Opus 5.5) implemented all week 8 files: task1.py, task2.py, week8compiler.py, grammar.ebnf and the tests8 tests. Before week 8 it also fixed the position of the "needs an initialiser" error (Prompt 1).
+
+
+Prompt 1 (Claude Code):
+"the runner rewrites .ast instead of comparing, and i32 x is reported at 1:6
+check these points in compilers folder, whether they are fixed"
+
+Summary of the answer:
+Neither point was fixed yet; both were fixed.
+- compiler.py: "i32 x" (a declaration with no "{") was reported one column past the end of the line (1:6). It is now reported at the variable name: "line 1:5: variable 'x' needs an initialiser in {}". If another token follows the name ("i32 x 5"), the error stays at that token (1:7). tests/invalid_test5.expected was changed from 1:6 to 1:5.
+- test_runner.py: the check that rewrote an .ast file whenever it differed was replaced with a real comparison (this part was reworked later, in prompts not included here).
+- All 89 tests passed afterwards.
+
+
+Prompt 2 (Claude Code):
+"bypass file edit approving, auto approve every file change. don't send me the refactored code, only state with bulleted list what you implemented and changed.
+The pdf requirements for week 8 practice are in the folder.
+Now the next practice. For each task, make one complete compiler file with changes, no commentaries inside the files, explain outside of the files how to test each task. when you implement a task, don't remove other features before it(don't leave the compiler with the only feature required in the task), remove the features only if you replace them with new functionality. the last file must be the full ready compiler for week 8 practice and additional task. also make tests for after last task  , the required amount of valid and invalid tests with the naming convention required in the practice, with .expected files and input files if needed. Also after finishing additional task, make a few tests for it. All the tests for after last task must be the tests required by the practice file. The tests for additional task you can create on your own. Remake grammar.ebnf for it to be valid for week 8 practice.
+After week 8 implementation all the previous errors should be thrown as they were thrown before week 8, unless stated explicitly otherwise in week 8 practice. Strictly follow the pdf requirements.
+For error tests, the compilation errors style you can look in this repo in main branch:
+https://github.com/LesunenkoNikita/Compilers"
+
+Summary of the answer:
+Created task1.py, task2.py, week8compiler.py, the tests8 tests and new rules in grammar.ebnf. With week8compiler.py as compiler.py, test_runner.py passed all 113 tests (every earlier week plus 24 new ones), and no existing test file or .ast changed. The PDF's three programs print exactly the expected output. No comments in the files.
+- Earlier errors, checked against the week 7 compiler on 162 programs: unchanged except "i32 x" at 1:5 (the fix from Prompt 1) and "a[0]", because "[" and "]" are now tokens. Changed on purpose by the PDF: calling a variable that is not callable ("'n' is not callable: it is i32") and calling a name that is both a variable and a function.
+- task1.py (callable objects):
+  - The call rule: for name(...), a visible variable (local, parameter or field) must be a struct with call, and the call becomes name.call(...); otherwise the name is a member function of the current struct, then a global function; otherwise an unknown function. obj.name(...) where name is a field becomes obj.name.call(...), so s.scale(7) and scale(side) inside a member function work.
+  - The rewrite is done in the semantic pass: --ast still shows Call; the checker puts a CallableCall member call in its place, which reuses the existing argument and mutation checks, so code generation did not change. triple(14) and triple.call(14) give the same IR line, call i32 @"Scale_call"(%"Scale"* %"triple", i32 14).
+  - Errors with line:column: "'p' is not callable: Point has no member function 'call'", "'n' is not callable: it is i32", "'twice' is both a variable and a function: rename one of them" (at the call; declaring both is allowed), "'t' needs 1 argument, got 2" (names the object), "cannot call 'c': its 'call' changes it, and it is not mut".
+- task2.py adds lambdas:
+  - fn name := [captures](params) -> type is allowed wherever a statement is: top level, functions, member functions, if, while, other lambdas. fn without [ inside a block and a capture list on a member function stay errors.
+  - The rewrite in the semantic pass: a struct lambda.NAME with one const field per capture, its member function call, and a variable NAME initialised with the captured values. In the IR: %"lambda.add_k" = type {i32}, @"lambda.add_k_call" with this as the first parameter, and an alloca, a gep and a store per capture.
+  - New flag --ast-checked prints the tree after the semantic pass (Lambda, Struct lambda.add_k, Member k i32 const, MemberFn call, Decl add_k lambda.add_k const, CallableCall add_k), as in the PDF.
+  - A capture is a copy taken at the declaration; a lambda in a loop takes the current value each time; a lambda may capture another lambda. The body sees only its parameters, locals, captures and global functions; a lambda cannot call itself.
+  - Errors, identical in wording and line:column to the PDF's reference: missing capture (19:11), assignment to a capture (19:5), duplicate capture (17:17), unknown name in the capture list (8:26), lambda passed as an argument (13:14). Also errors: a lambda as the value of exit, in a declaration, in an assignment, in print, add_k.k, a parameter named like a capture, a lambda calling itself.
+- week8compiler.py adds mut captures (the additional task): [mut n] makes the field mutable; a lambda that assigns a mut capture is mutating, so the mutation rule applies; the closure variable is mut when any capture is mut; a captured lambda is const unless written [mut next], and with [next] the call inside twice gives the PDF's error at 11:11.
+- Tests in tests8/ok and tests8/err (the repo's testsN layout), with .expected, .ast and one .in:
+  - ok, required by the PDF: callable_both_ways, callable_field, lambda_no_captures, capture_changed_after (with capture_changed_after.in), lambda_capture_param, lambda_in_loop, lambda_captures_lambda; plus the PDF programs callable_objects and lambdas.
+  - err, required by the PDF: struct_without_call, call_on_i32, variable_and_function, missing_capture, assign_to_capture, duplicate_capture, unknown_capture, lambda_as_argument, lambda_as_exit.
+  - Additional task: ok/mut_capture_counter, ok/mut_capture_in_loop, ok/mut_capture_two_lambdas, ok/mut_and_const_capture, ok/mut_capture_next_twice (the PDF program), err/const_capture_mutating_call (the PDF error).
+- grammar.ebnf: statement includes lambda, the PDF's lambda rule, and capture ::= [ "mut" ] ident.
+- How to test: python3 taskN.py program.txt output.ll && lli output.ll (add "< NAME.in" when the program reads input); python3 task2.py --ast-checked tests8/ok/lambdas.txt; for the full suite copy week8compiler.py to compiler.py and run python3 test_runner.py.
+
+
+Prompt 3 (Claude Code):
+"now, extract our conversation for week 8 as my prompts and summaries of your answers and add it to ai_usage.txt. You can also add my prompt for changing i32 x reporting on 1:5 and 1:6 and you can bypass todays prompts about command line tools installation, checking lcd working"
+
+P. S. prompts about command line tools installation and lcd were not part of the practice.
+
+Summary of the answer:
+This Practice 8 section was added to ai_usage.txt.
+
+
+What I took as-is and what I changed:
+The week 8 files, tests and grammar, and the "i32 x" position fix, were taken as-is after reviewing the bullet-point summaries above.

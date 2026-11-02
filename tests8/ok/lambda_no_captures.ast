@@ -1,0 +1,30 @@
+Program
+  Fn sq -> i32
+    Param v i32
+    Block
+      Decl r i32 const
+        BinOp *
+          Var v
+          Var v
+      Exit
+        Var r
+  Lambda plus_sq -> i32
+    Param a i32
+    Param b i32
+    Block
+      Decl r i32 const
+        BinOp +
+          Call sq
+            Var a
+          Call sq
+            Var b
+      Exit
+        Var r
+  Print
+    Call plus_sq
+      Const 3
+      Const 4
+  Exit
+    Call plus_sq
+      Const 1
+      Const 2

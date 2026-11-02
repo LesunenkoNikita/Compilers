@@ -1,0 +1,10 @@
+i32 step{5}
+i32 total{0}
+fn acc := [step, mut total]() -> i32
+{
+    total := total + step
+    exit total
+}
+print(acc())
+print(acc())
+exit acc()

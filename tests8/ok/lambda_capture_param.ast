@@ -1,0 +1,39 @@
+Program
+  Fn sq -> i32
+    Param v i32
+    Block
+      Decl r i32 const
+        BinOp *
+          Var v
+          Var v
+      Exit
+        Var r
+  Fn sum_scaled -> i32
+    Param factor i32
+    Param a i32
+    Param b i32
+    Block
+      Lambda times -> i32
+        Capture factor
+        Param v i32
+        Block
+          Decl r i32 const
+            BinOp *
+              Var factor
+              Call sq
+                Var v
+          Exit
+            Var r
+      Decl s i32 const
+        BinOp +
+          Call times
+            Var a
+          Call times
+            Var b
+      Exit
+        Var s
+  Exit
+    Call sum_scaled
+      Const 3
+      Const 1
+      Const 2

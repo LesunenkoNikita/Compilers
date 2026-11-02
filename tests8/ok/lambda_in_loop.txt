@@ -1,0 +1,14 @@
+i32 mut i{1}
+i32 mut total{0}
+while i != 4
+{
+    fn tenfold := [i]() -> i32
+    {
+        i32 r{i * 10}
+        exit r
+    }
+    i := i + 1
+    print(tenfold())
+    total := total + tenfold()
+}
+exit total

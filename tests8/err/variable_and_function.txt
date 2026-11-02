@@ -1,0 +1,17 @@
+struct Scale
+{
+    i32 k
+    fn call := (i32 v) -> i32
+    {
+        i32 r{v * k}
+        exit r
+    }
+}
+fn twice := (i32 v) -> i32
+{
+    i32 r{v * 2}
+    exit r
+}
+Scale twice{3}
+i32 a{twice(4)}
+exit a

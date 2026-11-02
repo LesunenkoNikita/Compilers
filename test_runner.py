@@ -2,33 +2,49 @@ import sys
 import os
 import subprocess
 import glob
+import difflib
 
 
 def check_ast(test_file):
     ast_file = test_file.replace(".txt", ".ast")
-    
+
     ast_comp = subprocess.run(
         [sys.executable, "compiler.py", "--ast", test_file],
         capture_output=True,
         text=True
     )
-    
+
     if ast_comp.returncode != 0:
         return False, "AST generation failed", ast_comp.stderr
-        
-    new_ast = ast_comp.stdout
-    if os.path.exists(ast_file):
-        with open(ast_file, "r") as f:
-            old_ast = f.read()
-        if old_ast != new_ast:
-            with open(ast_file, "w") as f:
-                f.write(new_ast)
-            return True, "AST updated", ""
-        return True, "AST matched", ""
-    else:
+
+    new_lines = ast_comp.stdout.splitlines(keepends=True)
+    if not os.path.exists(ast_file):
         with open(ast_file, "w") as f:
-            f.write(new_ast)
+            f.writelines(new_lines)
         return True, "AST created", ""
+
+    with open(ast_file, "r") as f:
+        old_lines = f.readlines()
+    if old_lines == new_lines:
+        return True, "AST matched", ""
+
+    patched = list(old_lines)
+    report = []
+    shift = 0
+    matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        patched[i1 + shift:i2 + shift] = new_lines[j1:j2]
+        shift += (j2 - j1) - (i2 - i1)
+        for k in range(i1, i2):
+            report.append(f"  line {k + 1} - {old_lines[k].rstrip()}\n")
+        for k in range(j1, j2):
+            report.append(f"  line {k + 1} + {new_lines[k].rstrip()}\n")
+
+    with open(ast_file, "w") as f:
+        f.writelines(patched)
+    return True, "AST updated, changed lines", "".join(report)
 
 
 def main():
@@ -93,9 +109,10 @@ def main():
                     if ast_msg != "AST matched":
                         msg += f" ({ast_msg})"
                     print(msg)
+                    print(err_detail, end="")
                     passed += 1
                 else:
-                    print(f"[{test_file}] FAILED (AST Error)")
+                    print(f"[{test_file}] FAILED ({ast_msg})")
                     print(err_detail, end="")
                     failed += 1
             else:

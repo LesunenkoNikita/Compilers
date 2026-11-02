@@ -1,0 +1,36 @@
+Program
+  Fn sq -> i32
+    Param v i32
+    Block
+      Decl r i32 const
+        BinOp *
+          Var v
+          Var v
+      Exit
+        Var r
+  Lambda inner -> i32
+    Param v i32
+    Block
+      Exit
+        Call sq
+          Var v
+  Decl k i32 const
+    Const 5
+  Lambda outer -> i32
+    Capture inner
+    Capture k
+    Param v i32
+    Block
+      Decl r i32 const
+        BinOp +
+          Call inner
+            Var v
+          Var k
+      Exit
+        Var r
+  Print
+    Call outer
+      Const 2
+  Exit
+    Call outer
+      Const 3

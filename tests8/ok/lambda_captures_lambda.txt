@@ -1,0 +1,17 @@
+fn sq := (i32 v) -> i32
+{
+    i32 r{v * v}
+    exit r
+}
+fn inner := [](i32 v) -> i32
+{
+    exit sq(v)
+}
+i32 k{5}
+fn outer := [inner, k](i32 v) -> i32
+{
+    i32 r{inner(v) + k}
+    exit r
+}
+print(outer(2))
+exit outer(3)

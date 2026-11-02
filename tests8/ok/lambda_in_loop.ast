@@ -1,0 +1,31 @@
+Program
+  Decl i i32 mut
+    Const 1
+  Decl total i32 mut
+    Const 0
+  While
+    BinOp !=
+      Var i
+      Const 4
+    Block
+      Lambda tenfold -> i32
+        Capture i
+        Block
+          Decl r i32 const
+            BinOp *
+              Var i
+              Const 10
+          Exit
+            Var r
+      Assign i
+        BinOp +
+          Var i
+          Const 1
+      Print
+        Call tenfold
+      Assign total
+        BinOp +
+          Var total
+          Call tenfold
+  Exit
+    Var total

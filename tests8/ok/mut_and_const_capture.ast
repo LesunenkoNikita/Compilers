@@ -1,0 +1,21 @@
+Program
+  Decl step i32 const
+    Const 5
+  Decl total i32 const
+    Const 0
+  Lambda acc -> i32
+    Capture step
+    Capture mut total
+    Block
+      Assign total
+        BinOp +
+          Var total
+          Var step
+      Exit
+        Var total
+  Print
+    Call acc
+  Print
+    Call acc
+  Exit
+    Call acc

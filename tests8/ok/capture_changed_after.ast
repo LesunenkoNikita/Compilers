@@ -1,0 +1,25 @@
+Program
+  Decl base i32 mut
+    Read
+  Lambda add_base -> i32
+    Capture base
+    Param y i32
+    Block
+      Decl r i32 const
+        BinOp +
+          Var base
+          Var y
+      Exit
+        Var r
+  Assign base
+    BinOp *
+      Var base
+      Const 100
+  Print
+    Var base
+  Print
+    Call add_base
+      Const 1
+  Exit
+    Call add_base
+      Const 2
