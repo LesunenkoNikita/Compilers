@@ -1,0 +1,1 @@
+compilation error: line 11:14: cannot call 'triple': its parameter 'v' is i32, got a value of type bool

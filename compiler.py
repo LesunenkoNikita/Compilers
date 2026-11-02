@@ -2159,14 +2159,40 @@ def children(node):
     return []
 
 
+def called_fn(node):
+    if isinstance(node, (CallNode, MemberCallNode)):
+        return node.fn
+    return None
+
+
 def contains(node, test):
     if test(node):
         return True
     return any(contains(c, test) for c in children(node))
 
 
-def has_call_or_read(expr):
-    return contains(expr, lambda n: isinstance(n, (CallNode, MemberCallNode, ReadNode)))
+def body_nodes(node):
+    yield node
+    for c in children(node):
+        if isinstance(c, LambdaNode):
+            yield from body_nodes(c.decl)
+            continue
+        yield from body_nodes(c)
+
+
+def collect_functions(node, fns):
+    if isinstance(node, FnDefNode):
+        fns.append(node)
+    if isinstance(node, LambdaNode):
+        fns.append(node.struct_def.methods[0])
+    for c in children(node):
+        collect_functions(c, fns)
+
+
+def all_functions(tree):
+    fns = []
+    collect_functions(tree, fns)
+    return fns
 
 
 def collect_lambda_structs(node, live):
@@ -2176,9 +2202,52 @@ def collect_lambda_structs(node, live):
         collect_lambda_structs(c, live)
 
 
+def effect_functions(tree):
+    fns = all_functions(tree)
+    calls = {id(f): [called_fn(n) for n in body_nodes(f.body) if called_fn(n) is not None] for f in fns}
+
+    def reaches_itself(start):
+        seen = set()
+        stack = list(calls.get(id(start), []))
+        while stack:
+            f = stack.pop()
+            if f is start:
+                return True
+            if id(f) in seen:
+                continue
+            seen.add(id(f))
+            stack.extend(calls.get(id(f), []))
+        return False
+
+    effects = set()
+    for f in fns:
+        nodes = list(body_nodes(f.body))
+        if any(isinstance(n, (PrintNode, ReadNode, WhileNode)) for n in nodes):
+            effects.add(id(f))
+        elif getattr(f, "mutating", False):
+            effects.add(id(f))
+        elif reaches_itself(f):
+            effects.add(id(f))
+
+    changed = True
+    while changed:
+        changed = False
+        for f in fns:
+            if id(f) not in effects and any(id(c) in effects for c in calls.get(id(f), [])):
+                effects.add(id(f))
+                changed = True
+    return effects
+
+
+def make_has_effect(effects):
+    def has_effect(expr):
+        return contains(expr, lambda n: isinstance(n, ReadNode) or (called_fn(n) is not None and id(called_fn(n)) in effects))
+    return has_effect
+
+
 class UseCounter:
-    def __init__(self, keeps_value):
-        self.keeps_value = keeps_value
+    def __init__(self, has_effect):
+        self.has_effect = has_effect
         self.reads = {}
         self.decls = {}
         self.calls = {}
@@ -2198,9 +2267,9 @@ class UseCounter:
                 if isinstance(st, DeclNode):
                     self.decls[id(st)] = st
                     self.reads.setdefault(id(st), 0)
-        if isinstance(node, DeclNode) and any(self.keeps_value(e) for e in node.inits):
+        if isinstance(node, DeclNode) and any(self.has_effect(e) for e in node.inits):
             self.read(node)
-        if isinstance(node, AssignNode) and self.keeps_value(node.value):
+        if isinstance(node, AssignNode) and self.has_effect(node.value):
             self.read(node.decl)
         if isinstance(node, (VarNode, FieldNode)):
             self.read(node.decl)
@@ -2234,7 +2303,8 @@ class Pruner:
 
 def remove_unused(tree):
     while True:
-        counter = UseCounter(has_call_or_read)
+        has_effect = make_has_effect(effect_functions(tree))
+        counter = UseCounter(has_effect)
         counter.count(tree)
         dead_decls = {d for d, k in counter.reads.items() if k == 0 and d in counter.decls}
         dead_fns = {f for f, k in counter.calls.items() if k == 0}
@@ -2286,7 +2356,7 @@ def main():
         input_path = args[0]
         output_path = args[1]
 
-    module = ir.Module(name="practice9_task2")
+    module = ir.Module(name="practice9")
     module.triple = llvm.get_default_triple()
 
     main_func_type = ir.FunctionType(I32, [])

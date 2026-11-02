@@ -1,0 +1,13 @@
+i32 mut total{0}
+if total == 0
+{
+    i32 unused{total + 5}
+    i32 used{7}
+    total := used * 2
+}
+while total != 14
+{
+    i32 temp{1}
+    total := total + 1
+}
+exit total

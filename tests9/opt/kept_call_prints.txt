@@ -1,0 +1,10 @@
+fn shout := (i32 v) -> i32
+{
+    print(v)
+    exit v
+}
+i32 shown{shout(42)}
+i32 mut later{0}
+later := shout(7)
+i32 dead{3}
+exit 0
