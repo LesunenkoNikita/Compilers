@@ -1,0 +1,25 @@
+fn spin := (i32 n) -> i32
+{
+    i32 mut i{0}
+    while i != n
+    {
+        i := i + 1
+    }
+    exit i
+}
+fn countdown := (i32 n) -> i32
+{
+    if n == 0
+    {
+        exit 0
+    }
+    exit countdown(n - 1)
+}
+fn plain := (i32 n) -> i32
+{
+    exit n
+}
+i32 a{spin(3)}
+i32 b{countdown(3)}
+i32 c{plain(3)}
+exit 0

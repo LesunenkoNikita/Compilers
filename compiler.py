@@ -1733,13 +1733,18 @@ class SemanticChecker:
         else:
             self.pending.append((call, chain, bad))
 
-    def check_args(self, node, fn, what, callee):
+    def check_args(self, node, fn, what, callee, callable_object=False):
         if len(node.args) != len(fn.params):
             raise CompileError(f"line {node.line}:{node.col}: {what} needs {plural(len(fn.params), 'argument')}, got {len(node.args)}")
         for arg, (p_type, p_name) in zip(node.args, fn.params):
             arg.accept(self)
             self.reject_lambda(arg, f"cannot be passed to '{callee}': its type has no name, so no parameter can have it")
-            self.check_assignable(arg, p_type, arg, f"initialise parameter '{p_name}'")
+            if callable_object and isinstance(arg, ConstNode) and p_type == "i32" and arg.type == "i64":
+                raise CompileError(f"line {arg.line}:{arg.col}: constant {arg.value} does not fit in i32")
+            if callable_object and not (arg.type == p_type or (arg.type == "i32" and p_type == "i64")):
+                raise CompileError(f"line {arg.line}:{arg.col}: cannot call '{callee}': its parameter '{p_name}' is {p_type}, got a value of type {arg.type}")
+            if not callable_object:
+                self.check_assignable(arg, p_type, arg, f"initialise parameter '{p_name}'")
 
     def visit_struct_def(self, node):
         if node.name in self.structs:
@@ -1990,6 +1995,8 @@ class SemanticChecker:
             if any(name == node.name for name, _, _ in self.lambda_stack):
                 raise CompileError(f"line {node.line}:{node.col}: lambda '{node.name}' cannot call itself")
             self.not_captured(node, node.name)
+            if node.name in self.structs:
+                raise CompileError(f"line {node.line}:{node.col}: '{node.name}' is a type, not a function or an object: it cannot be called")
             raise CompileError(f"line {node.line}:{node.col}: function '{node.name}' is used before its declaration")
 
         fn = self.functions[node.name]
@@ -2010,7 +2017,7 @@ class SemanticChecker:
         node.name = "call"
         node.label = label
         fn = sdef.method_index["call"]
-        self.check_args(node, fn, f"'{label}'", label)
+        self.check_args(node, fn, f"'{label}'", label, True)
         node.type = fn.ret_type
         node.fn = fn
         self.register_call(node, obj)
@@ -2120,6 +2127,197 @@ class SemanticChecker:
         node.type = "bool"
 
 
+def children(node):
+    if isinstance(node, ProgramNode):
+        return [m for st in node.structs for m in st.methods] + node.fns + node.stmts + [node.exit_node]
+    if isinstance(node, FnDefNode):
+        return [node.body]
+    if isinstance(node, BlockNode):
+        return node.statements + ([node.exit_node] if node.exit_node else [])
+    if isinstance(node, LambdaNode):
+        return [node.decl, node.body]
+    if isinstance(node, DeclNode):
+        return list(node.inits)
+    if isinstance(node, InitListNode):
+        return list(node.items)
+    if isinstance(node, (AssignNode, ExitNode, PrintNode)):
+        return [node.value]
+    if isinstance(node, IfNode):
+        return [node.cond, node.then_block] + ([node.else_block] if node.else_block else [])
+    if isinstance(node, WhileNode):
+        return [node.cond, node.body_block]
+    if isinstance(node, BinOpNode):
+        return [node.left, node.right]
+    if isinstance(node, NotNode):
+        return [node.operand]
+    if isinstance(node, MemberCallNode):
+        return [node.obj] + node.args
+    if isinstance(node, CallNode):
+        return list(node.args)
+    if isinstance(node, ResultFieldNode):
+        return [node.obj]
+    return []
+
+
+def called_fn(node):
+    if isinstance(node, (CallNode, MemberCallNode)):
+        return node.fn
+    return None
+
+
+def contains(node, test):
+    if test(node):
+        return True
+    return any(contains(c, test) for c in children(node))
+
+
+def body_nodes(node):
+    yield node
+    for c in children(node):
+        if isinstance(c, LambdaNode):
+            yield from body_nodes(c.decl)
+            continue
+        yield from body_nodes(c)
+
+
+def collect_functions(node, fns):
+    if isinstance(node, FnDefNode):
+        fns.append(node)
+    if isinstance(node, LambdaNode):
+        fns.append(node.struct_def.methods[0])
+    for c in children(node):
+        collect_functions(c, fns)
+
+
+def all_functions(tree):
+    fns = []
+    collect_functions(tree, fns)
+    return fns
+
+
+def collect_lambda_structs(node, live):
+    if isinstance(node, LambdaNode):
+        live.add(id(node.struct_def))
+    for c in children(node):
+        collect_lambda_structs(c, live)
+
+
+def effect_functions(tree):
+    fns = all_functions(tree)
+    calls = {id(f): [called_fn(n) for n in body_nodes(f.body) if called_fn(n) is not None] for f in fns}
+
+    def reaches_itself(start):
+        seen = set()
+        stack = list(calls.get(id(start), []))
+        while stack:
+            f = stack.pop()
+            if f is start:
+                return True
+            if id(f) in seen:
+                continue
+            seen.add(id(f))
+            stack.extend(calls.get(id(f), []))
+        return False
+
+    effects = set()
+    for f in fns:
+        nodes = list(body_nodes(f.body))
+        if any(isinstance(n, (PrintNode, ReadNode, WhileNode)) for n in nodes):
+            effects.add(id(f))
+        elif getattr(f, "mutating", False):
+            effects.add(id(f))
+        elif reaches_itself(f):
+            effects.add(id(f))
+
+    changed = True
+    while changed:
+        changed = False
+        for f in fns:
+            if id(f) not in effects and any(id(c) in effects for c in calls.get(id(f), [])):
+                effects.add(id(f))
+                changed = True
+    return effects
+
+
+def make_has_effect(effects):
+    def has_effect(expr):
+        return contains(expr, lambda n: isinstance(n, ReadNode) or (called_fn(n) is not None and id(called_fn(n)) in effects))
+    return has_effect
+
+
+class UseCounter:
+    def __init__(self, has_effect):
+        self.has_effect = has_effect
+        self.reads = {}
+        self.decls = {}
+        self.calls = {}
+
+    def read(self, decl):
+        self.reads[id(decl)] = self.reads.get(id(decl), 0) + 1
+
+    def count(self, tree):
+        for f in tree.fns:
+            self.calls.setdefault(id(f), 0)
+        self.visit(tree)
+
+    def visit(self, node):
+        if isinstance(node, (BlockNode, ProgramNode)):
+            stmts = node.statements if isinstance(node, BlockNode) else node.stmts
+            for st in stmts:
+                if isinstance(st, DeclNode):
+                    self.decls[id(st)] = st
+                    self.reads.setdefault(id(st), 0)
+        if isinstance(node, DeclNode) and any(self.has_effect(e) for e in node.inits):
+            self.read(node)
+        if isinstance(node, AssignNode) and self.has_effect(node.value):
+            self.read(node.decl)
+        if isinstance(node, (VarNode, FieldNode)):
+            self.read(node.decl)
+        if isinstance(node, CallNode) and not isinstance(node.fn, MemberFnNode):
+            self.calls[id(node.fn)] = self.calls.get(id(node.fn), 0) + 1
+        for c in children(node):
+            self.visit(c)
+
+
+class Pruner:
+    def __init__(self, dead_decls, dead_fns):
+        self.dead_decls = dead_decls
+        self.dead_fns = dead_fns
+
+    def keep(self, st):
+        if isinstance(st, DeclNode) and id(st) in self.dead_decls:
+            return False
+        if isinstance(st, AssignNode) and id(st.decl) in self.dead_decls:
+            return False
+        return True
+
+    def prune(self, node):
+        if isinstance(node, ProgramNode):
+            node.fns = [f for f in node.fns if id(f) not in self.dead_fns]
+            node.stmts = [st for st in node.stmts if self.keep(st)]
+        if isinstance(node, BlockNode):
+            node.statements = [st for st in node.statements if self.keep(st)]
+        for c in children(node):
+            self.prune(c)
+
+
+def remove_unused(tree):
+    while True:
+        has_effect = make_has_effect(effect_functions(tree))
+        counter = UseCounter(has_effect)
+        counter.count(tree)
+        dead_decls = {d for d, k in counter.reads.items() if k == 0 and d in counter.decls}
+        dead_fns = {f for f, k in counter.calls.items() if k == 0}
+        if not dead_decls and not dead_fns:
+            break
+        Pruner(dead_decls, dead_fns).prune(tree)
+
+    live = set()
+    collect_lambda_structs(tree, live)
+    tree.lambda_structs = [st for st in tree.lambda_structs if id(st) in live]
+    return tree
+
+
 def build_global_str(module, name, text):
     b = text.encode("ascii") + b"\0"
     g = ir.GlobalVariable(module, ir.ArrayType(I8, len(b)), name=name)
@@ -2133,7 +2331,11 @@ def main():
     args = sys.argv[1:]
     print_ast = False
     print_checked = False
+    optimize = False
 
+    if "--remove-unused" in args:
+        optimize = True
+        args.remove("--remove-unused")
     if "--ast" in args:
         print_ast = True
         args.remove("--ast")
@@ -2143,18 +2345,18 @@ def main():
 
     if print_ast or print_checked:
         if len(args) != 1:
-            print(f"usage: {sys.argv[0]} [--ast | --ast-checked] input.txt", file=sys.stderr)
+            print(f"usage: {sys.argv[0]} [--remove-unused] [--ast | --ast-checked] input.txt", file=sys.stderr)
             sys.exit(1)
         input_path = args[0]
         output_path = None
     else:
         if len(args) != 2:
-            print(f"usage: {sys.argv[0]} [--ast] input.txt output.ll", file=sys.stderr)
+            print(f"usage: {sys.argv[0]} [--remove-unused] input.txt output.ll", file=sys.stderr)
             sys.exit(1)
         input_path = args[0]
         output_path = args[1]
 
-    module = ir.Module(name="practice8")
+    module = ir.Module(name="practice9")
     module.triple = llvm.get_default_triple()
 
     main_func_type = ir.FunctionType(I32, [])
@@ -2189,6 +2391,9 @@ def main():
 
         checker = SemanticChecker()
         tree.accept(checker)
+
+        if optimize:
+            remove_unused(tree)
 
         if print_checked:
             tree.dump()

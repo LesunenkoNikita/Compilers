@@ -256,3 +256,78 @@ This Practice 8 section was added to ai_usage.txt.
 
 What I took as-is and what I changed:
 The week 8 files, tests and grammar, and the "i32 x" position fix, were taken as-is after reviewing the bullet-point summaries above.
+
+Practice 9:
+
+Tools: Claude Code (Claude Opus 5.5) implemented all week 9 files: task1.py, task2.py, week9compiler.py, the tests9 tests, the test_runner.py changes and the Optimizations section of README.md.
+
+
+Prompt 1 (Claude Code):
+"@"/Users/niklesunenko/Downloads/CS400_Practice_9.pdf"
+explain the purpose of an additional task"
+
+Summary of the answer:
+The additional task makes --remove-unused less cautious about calls. Task 1 keeps every declaration whose value contains a call or read(), although most functions print and read nothing. With the additional task a value is kept only if it contains read() or a call of a function with an effect: a function that prints or reads, a mutating member function, a function that may not return (a while, or a call of itself directly or through others), or a function that calls one of these. The set is computed as a fixpoint, and removals feed each other: in the PDF example a and b go, then quiet, then square, and the program still prints 5 and exits with 0. The safety rule stays: c.bump() is kept because it changes c, c.peek() can go.
+
+
+Prompt 2 (Claude Code):
+"bypass file edit approving, auto approve every file change. don't send me the refactored code, only state with bulleted list what you implemented and changed.
+The pdf requirements for week 9 practice are in the folder.
+Now the next practice. For each task, make one complete compiler file with changes, no commentaries inside the files, explain outside of the files how to test each task. when you implement a task, don't remove other features before it(don't leave the compiler with the only feature required in the task), remove the features only if you replace them with new functionality. the last file must be the full ready compiler for week 9 practice and additional task. also make tests for after last task  , the required amount of valid and invalid tests with the naming convention required in the practice, with .expected files and input files if needed. Also after finishing additional task, make a few tests for it. All the tests for after last task must be the tests required by the practice file. The tests for additional task you can create on your own. Remake grammar.ebnf for it to be valid for week 9 practice. remake test_runner.py to be valid for practice 9, make required additions to README.md.
+After week 9 implementation all the previous errors should be thrown as they were thrown before week 9, unless stated explicitly otherwise in week 9 practice. Strictly follow the pdf requirements.
+For error tests, the compilation errors style you can look up tests in the folder."
+
+Summary of the answer:
+Created task1.py, task2.py, week9compiler.py, the tests9/opt tests, a new test_runner.py and the Optimizations section of README.md. With week9compiler.py as compiler.py the runner passed 135/135 without the flag, 135/135 with --remove-unused and 248/248 with --both. All 113 earlier tests give the same output and errors as week 8 in all three files, with and without the flag; without the flag the IR and --ast-checked output of all 62 valid earlier programs are byte-identical to week 8. Both warm-ups, the three-function chain and the additional-task example give the PDF's results. No comments in the files.
+- task1.py (unused variables): --remove-unused anywhere on the command line, run after the checker; --ast-checked prints the optimized tree. One visitor counts reads per declaration through the decl link the checker sets (so two x's are counted separately); an assignment target is not a read; a value with a call or read() counts as used. Declarations with zero reads are removed from their block with their assignments, blocks are rebuilt, and the pass repeats until a round removes nothing. Parameters, fields and lambdas are never removed; an if or while whose block becomes empty stays.
+- task2.py adds unused functions: calls of global functions are counted everywhere (statements, functions, member functions, lambda bodies); a function with zero calls is removed with its body and the loop repeats; lambdas declared inside a removed function are dropped from code generation. Member functions, lambdas and cycles stay.
+- week9compiler.py adds calls without effects: the set of functions with an effect is computed as a fixpoint (print or read(), mutating member function, while, recursion, then their callers); a callable call counts as a call of its call member; a value is kept only if it contains read() or a call of a function with an effect.
+- Tests in tests9/opt (.txt, .astc, .expected; .expected is the same with and without the flag): required by the PDF: warmup_chain_of_reads, warmup_shadowed_x, three_function_chain, decl_inside_if, kept_call_prints, nothing_removed. Additional task: effects_example, effects_counter_bump_peek, effects_relay_chain, effects_loop_and_recursion, effects_lambdas.
+- test_runner.py: --remove-unused (or REMOVE_UNUSED=1) runs every test with the flag, --both runs every test both ways; programs in an opt folder always run both ways and are checked against .astc.
+- README.md: documents --ast-checked and adds an Optimizations section: the flag, the runner options, the self-feeding limit (k := k + 1), the cycle limit, and the note on who frees a removed subtree (CPython reference counting plus a cycle collector, no parent pointers in the tree, what a parent pointer would do to the count, and a weakref measurement: a removed declaration inside an if is freed right after the pass with gc disabled; a removed top-level declaration or function lives until the checker's symbol tables are dropped). While measuring, two helpers of the pass were found to form a reference cycle and were rewritten so reference counting alone frees removed nodes.
+- grammar.ebnf: unchanged, because week 9 adds a flag and a pass, not new syntax.
+
+
+Prompt 3 (Claude Code):
+"also
+What to fix:
+1. Still: test_runner.py rewrites a .ast file when it differs from the current output (AST updated, changed lines) and counts the test as passed, so an --ast snapshot can never fail.
+Small things:
+1. A struct name called like a function, print(Scale(3)), gives function 'Scale' is used before its declaration; Scale is a type, and nothing is declared later.
+2. A wrong argument type does not name the object: triple(true) gives cannot initialise parameter 'v' of type i32 with a value of type bool.
+3. The runner does not look at the folder: a program in tests8/ok that fails to compile still passes when its .expected holds the error text.
+for all the week 9 files"
+
+Summary of the answer:
+All four points were reproduced and fixed; the compiler fixes are in task1.py, task2.py and week9compiler.py. The runner passed 137/137 both without and with the flag and 252/252 with --both; all 113 earlier tests still match week 8.
+- test_runner.py: when an existing .ast or .astc differs from the compiler output, the test fails, prints only the changed lines and leaves the file untouched; a deliberate change is accepted with python3 test_runner.py --update-ast. A missing snapshot is still created automatically.
+- print(Scale(3)) now gives "'Scale' is a type, not a function or an object: it cannot be called", at the name.
+- triple(true) now gives "cannot call 'triple': its parameter 'v' is i32, got a value of type bool" (a callable field works the same, b.s(true)); the explicit triple.call(true) keeps its week 7 message.
+- The runner checks the folder: a program in ok/opt (or named valid...) must compile, a program in err (or named invalid...) must be rejected; otherwise the test fails even if .expected matches.
+- Added tests9/err/struct_called_as_function and tests9/err/callable_wrong_argument_type, and a README note on the folder rule and --update-ast.
+
+
+Prompt 4 (Claude Code):
+"python3: can't open file '/home/ubuntu/task1.py': [Errno 2] No such file or directory after
+python3 task1.py --remove-unused --ast-checked tests9/opt/warmup_shadowed_x.txt for task 1. mind this: the compiler file is always called compiler.py independent of task number etc"
+
+Summary of the answer:
+The test instructions were rewritten to use compiler.py: copy the task's file over compiler.py first (task1.py, task2.py, then week9compiler.py), then run python3 compiler.py ... with the same checks as before. The rule was also saved as a note so later instructions always use compiler.py.
+
+
+Prompt 5 (Claude Code):
+"explain what you've changed"
+
+Summary of the answer:
+No project file was changed by the previous answer; only the test instructions were rewritten, and a note about always running compiler.py was saved outside the project.
+
+
+Prompt 6 (Claude Code):
+"now make addition to ai_usage.txt as always for practices"
+
+Summary of the answer:
+This Practice 9 section was added to ai_usage.txt.
+
+
+What I took as-is and what I changed:
+The week 9 files, tests, test_runner.py and README.md changes were taken as-is after reviewing the bullet-point summaries above, together with the fixes for the reviewer's comments (Prompt 3).
